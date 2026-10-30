@@ -13,6 +13,10 @@ name: PR Coding Standards Review
 on:
   pull_request:
     types: [opened, ready_for_review, reopened, labeled, synchronize]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".changeset/**"
   issue_comment:
     types: [created]
   workflow_dispatch:

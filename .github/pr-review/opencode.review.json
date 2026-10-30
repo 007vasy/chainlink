@@ -53,12 +53,7 @@
           "rg *": "allow",
           "grep *": "allow",
           "ls *": "allow",
-          "cat *": "allow",
-          "sed -n*": "allow",
-          "head *": "allow",
-          "tail *": "allow",
-          "wc *": "allow",
-          "find *": "allow"
+          "wc *": "allow"
         }
       }
     }

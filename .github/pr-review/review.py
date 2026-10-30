@@ -22,8 +22,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import textwrap
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -726,9 +724,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     actual = git("rev-parse", "HEAD", cwd=workdir).strip()
     if actual != head_sha:
         print(
-            f"warning: worktree HEAD is {actual[:12]}, expected {head_sha[:12]}",
+            f"worktree HEAD is {actual[:12]}, expected {head_sha[:12]}; "
+            "check out the PR head or pass --checkout",
             file=sys.stderr,
         )
+        return 1
 
     standards_ref = None
     if args.standards:
