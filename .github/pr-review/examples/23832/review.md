@@ -7,7 +7,7 @@
 
 <!-- pr-coding-standards-review -->
 
-**Coding-standards review**
+**Code Oracle** · coding-standards review
 
 Reviewed `smartcontractkit/chainlink#23832` against `.github/copilot-instructions.md` at `develop`.
 
@@ -25,6 +25,8 @@ Reviewed `smartcontractkit/chainlink#23832` against `.github/copilot-instruction
 
 **Fix:** before removing, confirm the registry entry actually belongs to the pruned client (e.g. `registry.Get` and compare identity) and, when another cached CombinedClient for the same capID survives, re-register that client (or track which single shimID owns the registry entry, e.g. the lowest DON ID) instead of blindly calling `registry.Remove`.
 
+<sub>Code Oracle</sub>
+
 ### `core/capabilities/launcher.go:845` (RIGHT)
 
 **High** - Correctness
@@ -35,6 +37,8 @@ when a per-method shim is pruned while its capability/DON stays, the shim is clo
 
 **Fix:** add `RemoveTriggerSubscriber`/`RemoveExecutableClient` methods to `CombinedClient` that delete the map entry, and have `pruneStaleShims` detach the stale method from `w.cachedShims.combinedClients[shimID{capID: key.capID, donID: key.donID}]` before closing it.
 
+<sub>Code Oracle</sub>
+
 ### `core/capabilities/launcher_test.go:649` (RIGHT)
 
 **Medium** - Tests
@@ -44,3 +48,5 @@ the new tests exercise pruning only for trigger subscribers, trigger publishers,
 **Standard:** "Is new behaviour tested through its public interface, including error paths?"
 
 **Fix:** add `OnNewRegistry`-driven tests that serve an executable capability (`RemoteExecutableConfig`) and remove its method/DON, asserting the server shim and dispatcher receiver are removed, plus a client-side `RemoteExecutableConfig` prune case.
+
+<sub>Code Oracle</sub>

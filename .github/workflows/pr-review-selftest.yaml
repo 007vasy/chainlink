@@ -1,4 +1,4 @@
-name: PR Review Self-Test
+name: Code Oracle Self-Test
 
 on:
   pull_request:

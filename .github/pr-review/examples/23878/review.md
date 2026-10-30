@@ -7,7 +7,7 @@
 
 <!-- pr-coding-standards-review -->
 
-**Coding-standards review**
+**Code Oracle** · coding-standards review
 
 Reviewed `smartcontractkit/chainlink#23878` against `.github/copilot-instructions.md` at `develop`.
 
@@ -24,3 +24,5 @@ a failed capability-side unregistration is never retried and the state needed to
 **Standard:** "handled once, at the layer that can act on it"
 
 **Fix:** have the release waiter (and/or `close()`) retry the capability-side `Unregister` with backoff for entries whose `unregistered` flag is still false — keep such entries out of `deleteIf` until the unregister succeeds — and make `RegisterTriggers` abort (or block) when its pre-unregister fails instead of registering over the leftover
+
+<sub>Code Oracle</sub>

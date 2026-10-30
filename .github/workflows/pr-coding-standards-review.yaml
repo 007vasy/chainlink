@@ -1,8 +1,10 @@
-name: PR Coding Standards Review
+name: Code Oracle - PR Coding Standards Review
 
-# Reviews a PR against .github/copilot-instructions.md and posts inline review
-# comments. The reviewer is opencode + Fireworks GLM 5.3 Flash, the same stack
-# that produced the PR eval sheet.
+# Code Oracle reviews a PR against .github/copilot-instructions.md and posts
+# inline review comments. The reviewer is opencode + Fireworks GLM 5.3 Flash,
+# the same stack that produced the PR eval sheet. The GitHub token can only
+# post as github-actions[bot]; the Code Oracle persona lives in the review
+# body and comment footer. A true custom author needs a GitHub App.
 #
 # Requires the FIREWORKS_API_KEY repository secret.
 #
@@ -41,6 +43,12 @@ on:
         required: false
         default: false
         type: boolean
+      replay_example:
+        description: Replay a saved eval example instead of running the model
+        required: false
+        default: none
+        type: choice
+        options: ["none", "23837", "23832", "23878"]
 
 permissions:
   contents: read
@@ -147,6 +155,7 @@ jobs:
              .github/pr-review/opencode.review.json \
              .github/pr-review/review.py \
              "$RUNNER_TEMP/pr-review-kit/"
+          cp -R .github/pr-review/examples "$RUNNER_TEMP/pr-review-kit/examples"
 
       - name: Review pull request
         if: steps.pr.outputs.skip != 'true'
@@ -156,11 +165,26 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          mkdir -p /tmp/pr-review
+          REPLAY="${{ inputs.replay_example }}"
+          if [ -z "$REPLAY" ]; then REPLAY=none; fi
+          if [ "$REPLAY" != "none" ]; then
+            POST=()
+            if [ "${{ inputs.dry_run }}" != "true" ]; then
+              POST+=(--post)
+            fi
+            python3 "$RUNNER_TEMP/pr-review-kit/review.py" replay \
+              --repo "$REPO" \
+              --pr "${{ steps.pr.outputs.number }}" \
+              --example "$RUNNER_TEMP/pr-review-kit/examples/$REPLAY" \
+              --out-dir /tmp/pr-review \
+              "${POST[@]}"
+            exit 0
+          fi
           if [ -z "${FIREWORKS_API_KEY:-}" ]; then
             echo "FIREWORKS_API_KEY is not set for ${REPO}" >&2
             exit 1
           fi
-          mkdir -p /tmp/pr-review
           ARGS=(
             --repo "$REPO"
             --pr "${{ steps.pr.outputs.number }}"

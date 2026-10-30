@@ -7,7 +7,7 @@
 
 <!-- pr-coding-standards-review -->
 
-**Coding-standards review**
+**Code Oracle** · coding-standards review
 
 Reviewed `smartcontractkit/chainlink#23837` against `.github/copilot-instructions.md` at `develop`.
 
@@ -25,6 +25,8 @@ the new `CoordinatedEngine` gate limiter is never closed: `EngineFeatureFlags.Cl
 
 **Fix:** close both limiters in `EngineFeatureFlags.Close()` (e.g. `services.CloseAll(e.CoordinatedEngine, e.WorkflowTagBackfill)`) and release `workflowTagBackfill` on the `MakeGateLimiter` error path.
 
+<sub>Code Oracle</sub>
+
 ### `core/services/workflows/syncer/v2/trigger_coordinator.go:100` (RIGHT)
 
 **High** - Correctness
@@ -34,6 +36,8 @@ the new `CoordinatedEngine` gate limiter is never closed: `EngineFeatureFlags.Cl
 **Standard:** "Does the code do what the PR claims, for every input and state it can receive, including edge, empty, and failure cases?"
 
 **Fix:** return `ErrWorkflowNotCoordinated` from the noop (callers at handler.go:1053/1188 already suppress it) or amend the interface doc to state the no-op always returns nil.
+
+<sub>Code Oracle</sub>
 
 ### `core/services/workflows/syncer/v2/handler.go:1317` (RIGHT)
 
@@ -45,6 +49,8 @@ the new `CoordinatedEngine` gate limiter is never closed: `EngineFeatureFlags.Cl
 
 **Fix:** export the constant from `workflows/v2` (e.g. `PinnedWorkflowDonConfigVersion`) and reference it here instead of the literal.
 
+<sub>Code Oracle</sub>
+
 ### `core/services/workflows/syncer/v2/handler.go:1187` (RIGHT)
 
 **Medium** - Design
@@ -55,6 +61,8 @@ the coordinator-unregister block (1187-1191) is a verbatim copy of stopEngine's 
 
 **Fix:** extract a shared `eventHandler` helper (e.g. `unregisterCoordinatedTriggers(ctx, workflowID)`) and call it from both stopEngine and tryEngineCleanup.
 
+<sub>Code Oracle</sub>
+
 ### `core/services/workflows/syncer/v2/trigger_coordinator.go:70` (RIGHT)
 
 **Medium** - Tests
@@ -64,3 +72,5 @@ the new public `NewTriggerCoordinator`/`noopTriggerCoordinator` (RegisterTrigger
 **Standard:** "Is new behaviour tested through its public interface, including error paths?"
 
 **Fix:** add a focused test driving the real coordinator through RegisterTriggers/Ack/UnregisterTriggers and asserting its log-and-no-op contract.
+
+<sub>Code Oracle</sub>

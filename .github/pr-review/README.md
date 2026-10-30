@@ -1,7 +1,7 @@
 # PR coding-standards review
 
-This directory runs the coding-standards review for pull requests and turns
-the result into inline GitHub review comments.
+This directory runs **Code Oracle**, the coding-standards review bot for pull
+requests, and turns the result into inline GitHub review comments.
 
 It is the CI version of the eval that produced
 `chainlink-coding-standards-ai-automation-poc.xlsx`:
@@ -35,6 +35,18 @@ It is the CI version of the eval that produced
 
 The agent is read-only. GitHub writes happen in `review.py` after the agent
 exits, using the workflow's `GITHUB_TOKEN`.
+
+### Who posts?
+
+The workflow posts as `github-actions[bot]`. GitHub does not let a repository
+rename that account, so the **Code Oracle** persona is in the review body and
+the footer of every inline comment. The `GITHUB_TOKEN` cannot post as a custom
+bot. A true custom author (`code-oracle[bot]` with its own avatar) needs a
+GitHub App installed on the repository; that is a separate setup step.
+
+The `replay` subcommand posts a saved eval example through the workflow token,
+which is how the demo review on `007vasy/chainlink#3` was moved off a
+developer's personal `gh` login and onto the Actions bot.
 
 ## Triggers
 
@@ -105,6 +117,16 @@ python3 .github/pr-review/pr_evals.py replay \
 It also has `collect` (find merged PRs reviewed by a user) and `run` (run the
 live reviewer over a set in dry-run and write `pr_evals.jsonl` /
 `pr_evals.csv`).
+
+To post a saved example through the workflow token:
+
+```bash
+python3 .github/pr-review/review.py replay \
+  --repo 007vasy/chainlink \
+  --pr 3 \
+  --example .github/pr-review/examples/23837 \
+  --post
+```
 
 Validate the examples:
 

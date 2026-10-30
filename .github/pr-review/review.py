@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 MARKER = "<!-- pr-coding-standards-review -->"
+BOT_NAME = "Code Oracle"
 SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2}
 SEVERITY_LABEL = {"low": "Low", "medium": "Medium", "high": "High"}
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -325,6 +326,7 @@ def format_comment(finding: Dict[str, Any]) -> str:
     suggestion = finding.get("suggestion")
     if suggestion:
         parts.append(f"```suggestion\n{suggestion.strip()}\n```")
+    parts.append(f"<sub>{BOT_NAME}</sub>")
     parts.append(MARKER)
     return "\n\n".join(parts)
 
@@ -442,7 +444,7 @@ def build_payload(
     if not inline and not general and not post_clean:
         return None
 
-    lines = [MARKER, "**Coding-standards review**"]
+    lines = [MARKER, f"**{BOT_NAME}** · coding-standards review"]
     ref_label = standards_ref or base_sha[:12]
     lines.append(
         f"Reviewed `{repo}#{pr}` against `.github/copilot-instructions.md` at "
@@ -635,7 +637,7 @@ def write_outputs(
     step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if step_summary:
         with open(step_summary, "a", encoding="utf-8") as handle:
-            handle.write(f"## Coding-standards review\n\n{summary}\n\n")
+            handle.write(f"## {BOT_NAME}\n\n{summary}\n\n")
             if payload and payload.get("comments"):
                 for comment in payload["comments"]:
                     handle.write(
@@ -901,6 +903,82 @@ def cmd_render(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_replay(args: argparse.Namespace) -> int:
+    """Post a saved example review as the workflow bot.
+
+    The original eval payload was generated for an upstream PR. This rewrites
+    the source/target references and the commit id, adds the Code Oracle
+    persona, and posts it through the workflow token so the author is
+    github-actions[bot], not a developer's gh login.
+    """
+    example_dir = Path(args.example).resolve()
+    payload = json.loads((example_dir / "review.json").read_text(encoding="utf-8"))
+    if payload is None:
+        print("example has no findings")
+        return 0
+    source_meta = json.loads((example_dir / "meta.json").read_text(encoding="utf-8"))
+    pr_data = gh_json("api", f"repos/{args.repo}/pulls/{args.pr}")
+    head_sha = pr_data["head"]["sha"]
+    base_sha = pr_data["base"]["sha"]
+    source_ref = (
+        f"{source_meta.get('repo', 'smartcontractkit/chainlink')}"
+        f"#{source_meta.get('pr')}"
+    )
+    target_ref = f"{args.repo}#{args.pr}"
+
+    payload["commit_id"] = head_sha
+    body = payload.get("body", "")
+    body = body.replace(source_ref, target_ref)
+    body = body.replace(
+        "**Coding-standards review (eval replay)**",
+        f"**{BOT_NAME}** · coding-standards review (eval replay)",
+    )
+    body = body.replace(
+        "**Coding-standards review**",
+        f"**{BOT_NAME}** · coding-standards review (eval replay)",
+    )
+    if "(eval replay)" not in body:
+        body = body.replace(
+            f"**{BOT_NAME}** · coding-standards review",
+            f"**{BOT_NAME}** · coding-standards review (eval replay)",
+        )
+    note = (
+        f"Replayed from the original eval for "
+        f"{source_meta.get('url') or source_ref}."
+    )
+    if note not in body:
+        body = body.rstrip() + "\n\n" + note
+    payload["body"] = body
+    for comment in payload.get("comments", []):
+        comment_body = comment.get("body", "")
+        if BOT_NAME not in comment_body:
+            comment["body"] = comment_body.replace(
+                MARKER, f"<sub>{BOT_NAME}</sub>\n\n{MARKER}"
+            )
+
+    meta = {
+        "repo": args.repo,
+        "pr": args.pr,
+        "title": pr_data.get("title", ""),
+        "url": pr_data.get("html_url", ""),
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "source": source_meta.get("url", ""),
+    }
+    out_dir = Path(args.out_dir).resolve()
+    write_outputs(out_dir, payload, meta)
+    print(
+        f"replayed {source_ref} -> {target_ref}: "
+        f"{len(payload.get('comments', []))} inline comment(s)"
+    )
+    if not args.post:
+        print("dry-run: not posting (pass --post to post)")
+        return 0
+    post_review(args.repo, args.pr, payload, out_dir)
+    print("posted replay review")
+    return 0
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     payload = json.loads(Path(args.payload).read_text(encoding="utf-8"))
     if payload is None:
@@ -961,6 +1039,14 @@ def build_parser() -> argparse.ArgumentParser:
     render_parser.add_argument("--min-severity", choices=["low", "medium", "high"], default="medium")
     render_parser.add_argument("--max-findings", type=int, default=8)
     render_parser.set_defaults(func=cmd_render)
+
+    replay_parser = sub.add_parser("replay", help="post a saved example review")
+    replay_parser.add_argument("--repo", required=True)
+    replay_parser.add_argument("--pr", required=True, type=int)
+    replay_parser.add_argument("--example", required=True)
+    replay_parser.add_argument("--out-dir", default="/tmp/pr-review")
+    replay_parser.add_argument("--post", action="store_true")
+    replay_parser.set_defaults(func=cmd_replay)
 
     validate_parser = sub.add_parser("validate", help="validate a review payload")
     validate_parser.add_argument("--payload", required=True)
