@@ -350,6 +350,7 @@ def build_payload(
     max_findings: int,
     existing: Iterable[Dict[str, Any]] = (),
     post_clean: bool = False,
+    standards_ref: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     threshold = SEVERITY_ORDER[min_severity]
     seen = existing_keys(existing)
@@ -416,9 +417,10 @@ def build_payload(
         return None
 
     lines = [MARKER, "**Coding-standards review**"]
+    ref_label = standards_ref or base_sha[:12]
     lines.append(
         f"Reviewed `{repo}#{pr}` against `.github/copilot-instructions.md` at "
-        f"`{base_sha[:12]}`."
+        f"`{ref_label}`."
     )
     if inline:
         lines.append(f"{len(inline)} inline finding(s).")
@@ -700,17 +702,44 @@ def cmd_run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    standards_ref = None
     if args.standards:
         standards = Path(args.standards).read_text(encoding="utf-8")
     else:
+        # Prefer the base commit. A PR whose base predates the rulebook (or a
+        # demo PR based on an old commit) falls back to the default branch,
+        # then the head commit, rather than failing the review.
+        default_branch = None
         try:
-            standards = gh_raw(
-                f"repos/{args.repo}/contents/.github/copilot-instructions.md?ref={base_sha}"
-            )
-        except RuntimeError:
-            standards = git(
-                "show", f"{base_sha}:.github/copilot-instructions.md", cwd=workdir
-            )
+            default_branch = gh_json("api", f"repos/{args.repo}").get("default_branch")
+        except (RuntimeError, json.JSONDecodeError, AttributeError):
+            pass
+        standards = None
+        standards_ref = None
+        for ref in (base_sha, default_branch, head_sha):
+            if not ref:
+                continue
+            try:
+                standards = gh_raw(
+                    f"repos/{args.repo}/contents/.github/copilot-instructions.md?ref={ref}"
+                )
+                standards_ref = ref
+                print(f"standards from {ref[:12]}")
+                break
+            except RuntimeError:
+                continue
+        if standards is None:
+            for ref in (base_sha, head_sha):
+                try:
+                    standards = git(
+                        "show", f"{ref}:.github/copilot-instructions.md", cwd=workdir
+                    )
+                    standards_ref = ref
+                    break
+                except RuntimeError:
+                    continue
+        if standards is None:
+            raise RuntimeError("could not read .github/copilot-instructions.md")
 
     standards_path = out_dir / "standards.md"
     standards_path.write_text(standards, encoding="utf-8")
@@ -795,6 +824,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         min_severity=args.min_severity,
         max_findings=args.max_findings,
         existing=existing,
+        standards_ref=standards_ref,
     )
     write_outputs(out_dir, payload, meta)
 
@@ -835,6 +865,7 @@ def cmd_render(args: argparse.Namespace) -> int:
         min_severity=args.min_severity,
         max_findings=args.max_findings,
         existing=[],
+        standards_ref=meta.get("standards_ref"),
     )
     write_outputs(out_dir, payload, meta)
     print("wrote review.json and review.md")
