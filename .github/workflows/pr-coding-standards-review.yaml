@@ -133,6 +133,17 @@ jobs:
         if: steps.pr.outputs.skip != 'true'
         run: npm install --global opencode-ai@1.19.5
 
+      # The reviewer checks out the PR head in the workspace. Keep the runner
+      # scripts outside the workspace so an old PR head cannot remove them.
+      - name: Stage review kit
+        if: steps.pr.outputs.skip != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/pr-review-kit"
+          cp .github/pr-review/prompt.md \
+             .github/pr-review/opencode.review.json \
+             .github/pr-review/review.py \
+             "$RUNNER_TEMP/pr-review-kit/"
+
       - name: Review pull request
         if: steps.pr.outputs.skip != 'true'
         env:
@@ -162,7 +173,7 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.allow_closed }}" = "true" ]; then
             ARGS+=(--allow-closed)
           fi
-          python3 .github/pr-review/review.py run "${ARGS[@]}"
+          python3 "$RUNNER_TEMP/pr-review-kit/review.py" run "${ARGS[@]}"
 
       - name: Upload review artifact
         if: always() && steps.pr.outputs.skip != 'true'
