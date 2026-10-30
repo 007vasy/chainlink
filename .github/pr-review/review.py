@@ -276,7 +276,7 @@ def normalize_output(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
         if isinstance(suggestion, str) and suggestion.strip():
             suggestion = suggestion.strip()
             # A GitHub suggestion block is a code replacement, not prose.
-            if "\n" in suggestion or any(ch in suggestion for ch in "{}();=:[]"):
+            if "\n" in suggestion or any(ch in suggestion for ch in "{}();=[]"):
                 finding["suggestion"] = suggestion[:4000]
         findings.append(finding)
 
