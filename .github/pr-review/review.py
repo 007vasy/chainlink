@@ -15,7 +15,6 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -347,12 +346,14 @@ def format_general(entry: Dict[str, Any]) -> str:
     )
 
 
-def _body_hash(body: str) -> str:
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+def existing_keys(comments: Iterable[Dict[str, Any]]) -> set[Tuple[str, int]]:
+    """Deduplicate on path+line, not body text.
 
-
-def existing_keys(comments: Iterable[Dict[str, Any]]) -> set[Tuple[str, int, str]]:
-    keys: set[Tuple[str, int, str]] = set()
+    The model rephrases the same finding on every run; a body hash would let
+    it post a near-duplicate comment on the same line. One bot comment per
+    line is the useful unit.
+    """
+    keys: set[Tuple[str, int]] = set()
     for comment in comments:
         body = comment.get("body") or ""
         if MARKER not in body:
@@ -361,7 +362,7 @@ def existing_keys(comments: Iterable[Dict[str, Any]]) -> set[Tuple[str, int, str
         line = comment.get("line") or comment.get("original_line")
         if not path or not isinstance(line, int):
             continue
-        keys.add((path, line, _body_hash(body)))
+        keys.add((path, line))
     return keys
 
 
@@ -420,11 +421,11 @@ def build_payload(
                 }
             )
             continue
-        body = format_comment(finding)
-        key = (finding["path"], line, _body_hash(body))
+        key = (finding["path"], line)
         if key in seen:
             continue
         seen.add(key)
+        body = format_comment(finding)
         inline.append(
             {
                 "path": finding["path"],

@@ -187,9 +187,8 @@ class PayloadTests(unittest.TestCase):
         )
         self.assertIsNone(payload)
 
-    def test_existing_comment_is_deduplicated(self):
+    def test_existing_comment_is_deduplicated_by_location(self):
         item = finding()
-        body = review.format_comment(item)
         payload = review.build_payload(
             {"findings": [item], "general": []},
             review.parse_diff(SAMPLE_DIFF),
@@ -199,7 +198,13 @@ class PayloadTests(unittest.TestCase):
             base_sha="b" * 40,
             min_severity="medium",
             max_findings=8,
-            existing=[{"path": "foo.go", "line": 3, "body": body}],
+            existing=[
+                {
+                    "path": "foo.go",
+                    "line": 3,
+                    "body": "a rephrased finding on the same line " + review.MARKER,
+                }
+            ],
         )
         self.assertIsNone(payload)
 
