@@ -112,6 +112,11 @@ python3 .github/pr-review/pr_evals.py validate \
 
 ## Examples
 
+Live demo PRs: [#2](https://github.com/007vasy/chainlink/pull/2) (smoke test),
+[#3](https://github.com/007vasy/chainlink/pull/3) (replay of #23837),
+[#4](https://github.com/007vasy/chainlink/pull/4) (live #23832),
+[#5](https://github.com/007vasy/chainlink/pull/5) (live #23878).
+
 `examples/` contains three recent PRs reviewed by `jmank88`, each with:
 
 - `jmank.md` - his actual inline comments, as the style reference
