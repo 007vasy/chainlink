@@ -706,9 +706,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.standards:
         standards = Path(args.standards).read_text(encoding="utf-8")
     else:
-        # Prefer the base commit. A PR whose base predates the rulebook (or a
-        # demo PR based on an old commit) falls back to the default branch,
-        # then the head commit, rather than failing the review.
+        # Use the current default branch, exactly like the original eval's
+        # "current repo standard". A PR cannot weaken the rules because it
+        # cannot edit the default branch. Fall back to the base/head only if
+        # the default branch fetch is unavailable.
         default_branch = None
         try:
             default_branch = gh_json("api", f"repos/{args.repo}").get("default_branch")
@@ -716,7 +717,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             pass
         standards = None
         standards_ref = None
-        for ref in (base_sha, default_branch, head_sha):
+        for ref in (default_branch, base_sha, head_sha):
             if not ref:
                 continue
             try:

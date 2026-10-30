@@ -19,10 +19,10 @@ It is the CI version of the eval that produced
 `.github/workflows/pr-coding-standards-review.yaml`:
 
 1. Checks out the repository and resolves base/head SHAs for the PR.
-2. Reads the rulebook from the **base commit**, not the PR head, so a PR
-   cannot weaken the standards it is reviewed against. If the base predates
-   the rulebook, it falls back to the repository's default branch, then the
-   head commit.
+2. Reads the rulebook from the **default branch**, not the PR head, so a PR
+   cannot weaken the standards it is reviewed against. This matches the
+   original eval's "current repo standard"; if the default branch fetch is
+   unavailable it falls back to the base then the head commit.
 3. Fetches the PR diff and checks out the PR head.
 4. Runs opencode with the `pr-reviewer` agent in `opencode.review.json`. The agent
    can inspect the worktree (callers, types, tests) but cannot edit files,
