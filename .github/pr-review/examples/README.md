@@ -90,16 +90,17 @@ is the reviewed change.
 | --- | --- | --- | ---: |
 | [#2](https://github.com/007vasy/chainlink/pull/2) | smoke test (go.mod downgrade + flaky test) | live agent | 2 |
 | [#3](https://github.com/007vasy/chainlink/pull/3) | replay of [#23837](https://github.com/smartcontractkit/chainlink/pull/23837) | [eval replay](https://github.com/007vasy/chainlink/pull/3#pullrequestreview-5709418044) | 5 |
-| [#4](https://github.com/007vasy/chainlink/pull/4) | live agent on [#23832](https://github.com/smartcontractkit/chainlink/pull/23832) | live agent | 2 |
-| [#5](https://github.com/007vasy/chainlink/pull/5) | live agent on [#23878](https://github.com/smartcontractkit/chainlink/pull/23878) | live agent | 1 |
+| [#4](https://github.com/007vasy/chainlink/pull/4) | replay of [#23832](https://github.com/smartcontractkit/chainlink/pull/23832) | eval replay | 3 |
+| [#5](https://github.com/007vasy/chainlink/pull/5) | replay of [#23878](https://github.com/smartcontractkit/chainlink/pull/23878) | eval replay | 1 |
 | [#6](https://github.com/007vasy/chainlink/pull/6) | synthetic race/leak test | `pull_request` opened | 3 |
 
 The live runs on #4 and #5 reproduced the eval's two main #23832 findings and
 its #23878 finding. The live run on #3 returned no findings on the last run;
-the five comments there are a deterministic replay of the original eval
-response. That variance is exactly why the eval harness judges pooled
-findings rather than trusting one model run, and why the workflow is silent
-when it is not confident.
+the current demo comments on #3/#4/#5 are deterministic replays of the
+original eval responses, posted by the Code Oracle workflow so the author is
+`github-actions[bot]` rather than a developer's `gh` login. That variance is
+exactly why the eval harness judges pooled findings rather than trusting one
+model run, and why the workflow is silent when it is not confident.
 
 The old jmank88 demo PRs use base branches at their original base commits,
 which predate this workflow, so GitHub cannot run a `pull_request` workflow

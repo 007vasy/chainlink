@@ -214,6 +214,21 @@ class PayloadTests(unittest.TestCase):
         self.assertIn("```suggestion\nfunc new() {}\n```", body)
         self.assertNotIn("\\\\n", body)
 
+    def test_comments_carry_the_code_oracle_persona(self):
+        body = review.format_comment(finding())
+        self.assertIn(review.BOT_NAME, body)
+        payload = review.build_payload(
+            {"findings": [finding()], "general": []},
+            review.parse_diff(SAMPLE_DIFF),
+            repo="owner/repo",
+            pr=1,
+            head_sha="a" * 40,
+            base_sha="b" * 40,
+            min_severity="medium",
+            max_findings=8,
+        )
+        self.assertIn(review.BOT_NAME, payload["body"])
+
 
 if __name__ == "__main__":
     unittest.main()
