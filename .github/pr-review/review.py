@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the coding-standards reviewer and turn its findings into a GitHub review.
 
-The reviewer is opencode with the `pr-reviewer` agent in `opencode.json`.
+The reviewer is opencode with the `pr-reviewer` agent in `opencode.review.json`.
 It receives the PR diff, the rulebook from the base commit, and a read-only
 checkout of the PR head. It returns JSON findings; this script anchors every
 finding to a real diff line and posts one COMMENT review with inline comments.
@@ -454,7 +454,7 @@ def opencode_env(out_dir: Path) -> Dict[str, str]:
     home = out_dir / "home"
     config_dir = home / ".config" / "opencode"
     config_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(HERE / "opencode.json", config_dir / "opencode.json")
+    shutil.copy2(HERE / "opencode.review.json", config_dir / "opencode.json")
     env["HOME"] = str(home)
     env["XDG_CONFIG_HOME"] = str(home / ".config")
     env["XDG_DATA_HOME"] = str(home / ".local" / "share")
@@ -479,7 +479,6 @@ def run_agent(
     log_path = out_dir / "opencode.log"
     cmd = [
         opencode_bin,
-        "--standalone",
         "run",
         "--agent",
         "pr-reviewer",

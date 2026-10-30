@@ -1,0 +1,66 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "share": "disabled",
+  "model": "fireworks-ai/accounts/fireworks/models/glm-5p3-flash",
+  "small_model": "fireworks-ai/accounts/fireworks/models/glm-5p3-flash",
+  "provider": {
+    "fireworks-ai": {
+      "options": {
+        "baseURL": "https://api.fireworks.ai/inference/v1",
+        "apiKey": "{env:FIREWORKS_API_KEY}"
+      },
+      "models": {
+        "accounts/fireworks/models/glm-5p3-flash": {
+          "name": "GLM 5.3 Flash",
+          "limit": {
+            "context": 131072,
+            "output": 32768
+          }
+        }
+      }
+    }
+  },
+  "agent": {
+    "pr-reviewer": {
+      "description": "Reviews a Chainlink PR against the repository review standards and returns grounded inline findings. Read-only.",
+      "mode": "primary",
+      "model": "fireworks-ai/accounts/fireworks/models/glm-5p3-flash",
+      "temperature": 0.1,
+      "permission": {
+        "edit": "deny",
+        "todowrite": "deny",
+        "task": "deny",
+        "question": "deny",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "skill": "deny",
+        "lsp": "deny",
+        "external_directory": {
+          "*": "deny",
+          "/tmp/pr-review/**": "allow"
+        },
+        "bash": {
+          "*": "deny",
+          "git diff*": "allow",
+          "git show*": "allow",
+          "git log*": "allow",
+          "git status*": "allow",
+          "git cat-file*": "allow",
+          "git grep*": "allow",
+          "git rev-parse*": "allow",
+          "git merge-base*": "allow",
+          "git ls-files*": "allow",
+          "rg *": "allow",
+          "grep *": "allow",
+          "ls *": "allow",
+          "cat *": "allow",
+          "sed -n*": "allow",
+          "head *": "allow",
+          "tail *": "allow",
+          "wc *": "allow",
+          "find *": "allow"
+        }
+      }
+    }
+  }
+}

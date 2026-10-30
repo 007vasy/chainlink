@@ -131,7 +131,7 @@ jobs:
 
       - name: Install opencode
         if: steps.pr.outputs.skip != 'true'
-        run: npm install --global opencode-ai@2.2.2
+        run: npm install --global opencode-ai@1.19.5
 
       - name: Review pull request
         if: steps.pr.outputs.skip != 'true'

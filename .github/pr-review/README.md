@@ -22,7 +22,7 @@ It is the CI version of the eval that produced
 2. Reads the rulebook from the **base commit**, not the PR head, so a PR
    cannot weaken the standards it is reviewed against.
 3. Fetches the PR diff and checks out the PR head.
-4. Runs opencode with the `pr-reviewer` agent in `opencode.json`. The agent
+4. Runs opencode with the `pr-reviewer` agent in `opencode.review.json`. The agent
    can inspect the worktree (callers, types, tests) but cannot edit files,
    run tests, or reach the network.
 5. Validates the agent's JSON findings and anchors each one to a line that is
