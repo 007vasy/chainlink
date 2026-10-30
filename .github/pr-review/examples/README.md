@@ -102,6 +102,12 @@ original eval responses, posted by the Code Oracle workflow so the author is
 exactly why the eval harness judges pooled findings rather than trusting one
 model run, and why the workflow is silent when it is not confident.
 
+All current inline comments are authored by `github-actions[bot]` and carry
+the **Code Oracle** persona. The first #3 replay was posted by hand with a
+developer `gh` token, so GitHub attributed it to that account; those comments
+were deleted and reposted through the workflow, and the old review body is
+minimized as superseded.
+
 The old jmank88 demo PRs use base branches at their original base commits,
 which predate this workflow, so GitHub cannot run a `pull_request` workflow
 from those base branches. They were run with `workflow_dispatch`. PR #6
