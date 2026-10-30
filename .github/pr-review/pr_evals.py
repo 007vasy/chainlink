@@ -242,6 +242,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
             min_severity="low",
             max_findings=args.max_findings,
             existing=[],
+            standards_ref="develop",
         )
 
         directory = out_dir / str(number)

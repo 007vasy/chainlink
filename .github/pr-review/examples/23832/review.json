@@ -1,7 +1,7 @@
 {
   "commit_id": "6903eb27ecca0f9c31290cc1a9a9f3bbcef101ae",
   "event": "COMMENT",
-  "body": "<!-- pr-coding-standards-review -->\n\n**Coding-standards review**\n\nReviewed `smartcontractkit/chainlink#23832` against `.github/copilot-instructions.md` at `b1e866ef89e4`.\n\n3 inline finding(s).",
+  "body": "<!-- pr-coding-standards-review -->\n\n**Coding-standards review**\n\nReviewed `smartcontractkit/chainlink#23832` against `.github/copilot-instructions.md` at `develop`.\n\n3 inline finding(s).",
   "comments": [
     {
       "path": "core/capabilities/launcher.go",

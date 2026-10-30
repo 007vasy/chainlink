@@ -1,7 +1,7 @@
 {
   "commit_id": "f881b528cdc2803a914db5cad570724fc75afdd1",
   "event": "COMMENT",
-  "body": "<!-- pr-coding-standards-review -->\n\n**Coding-standards review**\n\nReviewed `smartcontractkit/chainlink#23878` against `.github/copilot-instructions.md` at `eaa743b150ca`.\n\n1 inline finding(s).",
+  "body": "<!-- pr-coding-standards-review -->\n\n**Coding-standards review**\n\nReviewed `smartcontractkit/chainlink#23878` against `.github/copilot-instructions.md` at `develop`.\n\n1 inline finding(s).",
   "comments": [
     {
       "path": "core/services/workflows/v2/triggers/coordinator.go",

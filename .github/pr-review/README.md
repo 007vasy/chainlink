@@ -56,6 +56,9 @@ clear message if it is missing.
 
 ## Local use
 
+`--checkout` runs `git checkout --detach <head>`, so use a clean checkout or a
+separate worktree; do not run it in a tree with uncommitted work.
+
 Dry-run a PR without posting:
 
 ```bash

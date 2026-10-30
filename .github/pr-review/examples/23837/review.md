@@ -9,7 +9,7 @@
 
 **Coding-standards review**
 
-Reviewed `smartcontractkit/chainlink#23837` against `.github/copilot-instructions.md` at `3e6f5a66fef3`.
+Reviewed `smartcontractkit/chainlink#23837` against `.github/copilot-instructions.md` at `develop`.
 
 5 inline finding(s).
 
