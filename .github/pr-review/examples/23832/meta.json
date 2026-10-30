@@ -1,0 +1,10 @@
+{
+  "repo": "smartcontractkit/chainlink",
+  "pr": 23832,
+  "title": "[CRE] Prune stale remote capability shims in the launcher",
+  "url": "https://github.com/smartcontractkit/chainlink/pull/23832",
+  "base_sha": "b1e866ef89e4ab4dbca6cfc002b40b026b5193a1",
+  "head_sha": "6903eb27ecca0f9c31290cc1a9a9f3bbcef101ae",
+  "merged_at": "2026-09-29T16:53:22Z",
+  "source": "intern4all/pr-eval"
+}

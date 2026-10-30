@@ -1,0 +1,10 @@
+{
+  "repo": "smartcontractkit/chainlink",
+  "pr": 23837,
+  "title": "[CRE-6745] wire noop coordinator + feature flag",
+  "url": "https://github.com/smartcontractkit/chainlink/pull/23837",
+  "base_sha": "3e6f5a66fef328353818cf22a9e15706ebcb3106",
+  "head_sha": "f9b4c8367b58a0cb50bb36098976a063c3f42ee8",
+  "merged_at": "2026-09-29T17:24:52Z",
+  "source": "intern4all/pr-eval"
+}

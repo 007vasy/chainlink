@@ -1,0 +1,37 @@
+{
+  "commit_id": "f9b4c8367b58a0cb50bb36098976a063c3f42ee8",
+  "event": "COMMENT",
+  "body": "<!-- pr-coding-standards-review -->\n\n**Coding-standards review**\n\nReviewed `smartcontractkit/chainlink#23837` against `.github/copilot-instructions.md` at `3e6f5a66fef3`.\n\n5 inline finding(s).",
+  "comments": [
+    {
+      "path": "core/services/workflows/v2/config.go",
+      "line": 405,
+      "side": "RIGHT",
+      "body": "**High** - Lifecycle\n\nthe new `CoordinatedEngine` gate limiter is never closed: `EngineFeatureFlags.Close()` (config.go:415-420) closes only `WorkflowTagBackfill`, while the analogous `CentralizedWorkflowOwnerVerificationEnabled` gate limiter is closed in `EngineLimiters.Close()` (config.go:378); additionally, if `MakeGateLimiter` here fails, the already-created `workflowTagBackfill` is leaked since the error return skips cleanup\n\n**Standard:** \"Is everything acquired or started (contexts, goroutines, connections, handles) released or stopped on every path, including errors and shutdown?\"\n\n**Fix:** close both limiters in `EngineFeatureFlags.Close()` (e.g. `services.CloseAll(e.CoordinatedEngine, e.WorkflowTagBackfill)`) and release `workflowTagBackfill` on the `MakeGateLimiter` error path.\n\n<!-- pr-coding-standards-review -->"
+    },
+    {
+      "path": "core/services/workflows/syncer/v2/trigger_coordinator.go",
+      "line": 100,
+      "side": "RIGHT",
+      "body": "**High** - Correctness\n\n`noopTriggerCoordinator.UnregisterTriggers` always returns nil although the interface it implements promises \"Returns ErrWorkflowNotCoordinated if workflowID was never registered here\" (line 52); the noop registers nothing, so by that contract every call should return the sentinel, making `ErrWorkflowNotCoordinated` (line 17) unreachable from the repo's only implementation\n\n**Standard:** \"Does the code do what the PR claims, for every input and state it can receive, including edge, empty, and failure cases?\"\n\n**Fix:** return `ErrWorkflowNotCoordinated` from the noop (callers at handler.go:1053/1188 already suppress it) or amend the interface doc to state the no-op always returns nil.\n\n<!-- pr-coding-standards-review -->"
+    },
+    {
+      "path": "core/services/workflows/syncer/v2/handler.go",
+      "line": 1317,
+      "side": "RIGHT",
+      "body": "**Medium** - Design\n\n`WorkflowDonConfigVersion` is hardcoded to `1`, duplicating `pinnedWorkflowDonConfigVersion = 1` (base_engine.go:65) with a comment admitting it is \"mirrored here since the syncer can't reference that unexported v2 constant\"; if v2 ever bumps the pin, legacy and coordinated paths silently emit different DON config versions in trigger metadata\n\n**Standard:** \"Does each design decision (format, algorithm, storage) live in one place, or must several packages change together?\"\n\n**Fix:** export the constant from `workflows/v2` (e.g. `PinnedWorkflowDonConfigVersion`) and reference it here instead of the literal.\n\n<!-- pr-coding-standards-review -->"
+    },
+    {
+      "path": "core/services/workflows/syncer/v2/handler.go",
+      "line": 1187,
+      "side": "RIGHT",
+      "body": "**Medium** - Design\n\nthe coordinator-unregister block (1187-1191) is a verbatim copy of stopEngine's (1052-1056), and its own comment (1183-1186) says the path \"must mirror stopEngine's coordinator handling, or trigger registrations are left orphaned on this path alone\"; a future edit to one copy (e.g. changing the error-suppression filter) that misses the other orphans registrations on one stop path\n\n**Standard:** \"Is each piece of knowledge represented once?\"\n\n**Fix:** extract a shared `eventHandler` helper (e.g. `unregisterCoordinatedTriggers(ctx, workflowID)`) and call it from both stopEngine and tryEngineCleanup.\n\n<!-- pr-coding-standards-review -->"
+    },
+    {
+      "path": "core/services/workflows/syncer/v2/trigger_coordinator.go",
+      "line": 70,
+      "side": "RIGHT",
+      "body": "**Medium** - Tests\n\nthe new public `NewTriggerCoordinator`/`noopTriggerCoordinator` (RegisterTriggers, Ack, UnregisterTriggers, Start warning) has no test; handler tests only exercise `recordingCoordinator` fakes, so the noop's contract is unpinned and a regression (e.g. Ack returning an error) would pass CI\n\n**Standard:** \"Is new behaviour tested through its public interface, including error paths?\"\n\n**Fix:** add a focused test driving the real coordinator through RegisterTriggers/Ack/UnregisterTriggers and asserting its log-and-no-op contract.\n\n<!-- pr-coding-standards-review -->"
+    }
+  ]
+}

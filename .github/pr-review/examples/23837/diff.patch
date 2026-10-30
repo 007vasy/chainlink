@@ -1,0 +1,1669 @@
+diff --git a/core/scripts/go.mod b/core/scripts/go.mod
+index 04d3b87f701..6192c0d049b 100644
+--- a/core/scripts/go.mod
++++ b/core/scripts/go.mod
+@@ -33,7 +33,7 @@ require (
+ 	github.com/shopspring/decimal v1.4.0
+ 	github.com/smartcontractkit/chain-selectors v1.0.111
+ 	github.com/smartcontractkit/chainlink-ccip/chains/evm v0.0.0-20260916222901-720a003dab50
+-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f
++	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49
+ 	github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d
+ 	github.com/smartcontractkit/chainlink-deployments-framework v0.122.2
+ 	github.com/smartcontractkit/chainlink-evm v0.3.4-0.20260917132551-2a2b38e8b744
+diff --git a/core/scripts/go.sum b/core/scripts/go.sum
+index 913f3b39798..5f13531b1ba 100644
+--- a/core/scripts/go.sum
++++ b/core/scripts/go.sum
+@@ -1683,8 +1683,8 @@ github.com/smartcontractkit/chainlink-ccip/deployment v0.0.0-20260916222901-720a
+ github.com/smartcontractkit/chainlink-ccip/deployment v0.0.0-20260916222901-720a003dab50/go.mod h1:Dm/Abz0vr7F2v9TygUX947q8HIwJEJikDfSdanX1Cic=
+ github.com/smartcontractkit/chainlink-ccv v0.13.1-0.20260918171034-c93b0d2ef3c0 h1:3f+Ijgr0vghawMUAitgFILQpt4KsoYHGv1Zb/YBeeQM=
+ github.com/smartcontractkit/chainlink-ccv v0.13.1-0.20260918171034-c93b0d2ef3c0/go.mod h1:gX7FJzSnGQx4RAlsn2rRW8IQBlEFZYiXFXEEB5jnQgA=
+-github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f h1:gasuIea3r0AIuEkXDQvIw+TclWt184xBRZGwed+fP6I=
+-github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f/go.mod h1:2AvwgNr3I6s0Ny1qmovy/stHQIihEv/9g74aNYzQYYo=
++github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49 h1:8vq1hWW7NR22x6+hpT727FREMQL4LqZuTpgKBTHVUKo=
++github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49/go.mod h1:2AvwgNr3I6s0Ny1qmovy/stHQIihEv/9g74aNYzQYYo=
+ github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d h1:M9xuiIvdiHtim4nlxCVajyC/Mk63tAg9ESWb/biAhNA=
+ github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d/go.mod h1:rI2njmTlyTvh+xhmORmK6qX3+V1ycDAqGJLu8LS8WpU=
+ github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20260915184316-2730f1867c92 h1:Z1OIGukDhJD+Gknr5G07Vtml24E7BwKaIQoWzV/SdqA=
+diff --git a/core/services/cre/cre.go b/core/services/cre/cre.go
+index 1e9b2046986..834cb5d07c2 100644
+--- a/core/services/cre/cre.go
++++ b/core/services/cre/cre.go
+@@ -973,6 +973,9 @@ func newWorkflowRegistrySyncerV2(
+ 		syncerV2.WithShardRoutingSteady(shardRoutingSteady),
+ 		syncerV2.WithShardResolver(shardResolver),
+ 		syncerV2.WithShardIndex(uint32(cfg.Sharding().ShardIndex())),
++		syncerV2.WithTriggerCoordinator(
++			syncerV2.NewTriggerCoordinator(opts.CapabilitiesRegistry, engineRegistry, clockwork.NewRealClock(), lggr),
++		),
+ 	}
+ 	if shardingEnabled && dispatcher != nil {
+ 		handlerOpts = append(handlerOpts,
+diff --git a/core/services/workflows/syncer/v2/engine_registry.go b/core/services/workflows/syncer/v2/engine_registry.go
+index 82eba6d951d..f360a1f0132 100644
+--- a/core/services/workflows/syncer/v2/engine_registry.go
++++ b/core/services/workflows/syncer/v2/engine_registry.go
+@@ -9,6 +9,7 @@ import (
+ 	"github.com/smartcontractkit/chainlink-common/pkg/hashutil"
+ 	"github.com/smartcontractkit/chainlink-common/pkg/services"
+ 	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/types"
++	v2 "github.com/smartcontractkit/chainlink/v2/core/services/workflows/v2"
+ )
+ 
+ var ErrNotFound = errors.New("engine not found")
+@@ -23,6 +24,13 @@ type ServiceWithMetadata struct {
+ 	services.Service
+ }
+ 
++// Coordinated is true for an engine that leaves trigger registration,
++// dequeuing and acknowledgement to the TriggerCoordinator.
++func (e ServiceWithMetadata) Coordinated() bool {
++	engine, ok := e.Service.(v2.WorkflowEngine)
++	return ok && engine.IsCoordinated()
++}
++
+ // engineEntry holds the engine and its associated source for internal storage.
+ type engineEntry struct {
+ 	engine       services.Service
+diff --git a/core/services/workflows/syncer/v2/engine_registry_test.go b/core/services/workflows/syncer/v2/engine_registry_test.go
+index 09ca7e02850..92270c0edb6 100644
+--- a/core/services/workflows/syncer/v2/engine_registry_test.go
++++ b/core/services/workflows/syncer/v2/engine_registry_test.go
+@@ -3,11 +3,13 @@ package v2
+ import (
+ 	"context"
+ 	"testing"
++	"time"
+ 
+ 	"github.com/stretchr/testify/require"
+ 
+ 	"github.com/smartcontractkit/chainlink-common/pkg/services"
+ 	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/types"
++	v2 "github.com/smartcontractkit/chainlink/v2/core/services/workflows/v2"
+ )
+ 
+ func TestEngineRegistry(t *testing.T) {
+@@ -168,3 +170,109 @@ func (f fakeService) Ready() error { return nil }
+ func (f fakeService) HealthReport() map[string]error { return map[string]error{} }
+ 
+ func (f fakeService) Name() string { return "" }
++
++// fakeDrainableService reports a fixed drain state; it is otherwise a fakeService.
++type fakeDrainableService struct {
++	fakeService
++	draining bool
++}
++
++func (f *fakeDrainableService) Drain() bool { return false }
++
++func (f *fakeDrainableService) ActiveExecutions() int32 { return 0 }
++
++func (f *fakeDrainableService) DrainStartedAt() (time.Time, bool) {
++	if !f.draining {
++		return time.Time{}, false
++	}
++	return time.Unix(1, 0), true
++}
++
++// fakeCoordinatedDrainableEngine is a v2.WorkflowEngine that reports as
++// coordinated and drainable. Only the methods ServiceWithMetadata.Coordinated
++// and the DrainableService assertion touch are implemented.
++type fakeCoordinatedDrainableEngine struct {
++	v2.WorkflowEngine
++	draining bool
++}
++
++func (f *fakeCoordinatedDrainableEngine) IsCoordinated() bool { return true }
++
++func (f *fakeCoordinatedDrainableEngine) Drain() bool { return false }
++
++func (f *fakeCoordinatedDrainableEngine) ActiveExecutions() int32 { return 0 }
++
++func (f *fakeCoordinatedDrainableEngine) DrainStartedAt() (time.Time, bool) {
++	if !f.draining {
++		return time.Time{}, false
++	}
++	return time.Unix(1, 0), true
++}
++
++func TestEngineRegistry_Coordinated(t *testing.T) {
++	t.Parallel()
++	legacyID := types.WorkflowID([32]byte{1})
++	coordinatedID := types.WorkflowID([32]byte{2})
++
++	er := NewEngineRegistry()
++	require.NoError(t, er.AddWithReconcileKey(legacyID, "TestSource", "legacy-key", &fakeService{}))
++	require.NoError(t, er.AddWithReconcileKey(coordinatedID, "TestSource", "coordinated-key", &fakeCoordinatedDrainableEngine{}))
++	require.ErrorIs(t, er.AddWithReconcileKey(coordinatedID, "TestSource", "coordinated-key", &fakeCoordinatedDrainableEngine{}), ErrAlreadyExists)
++
++	entry, ok := er.Get(coordinatedID)
++	require.True(t, ok)
++	require.True(t, entry.Coordinated())
++	require.Equal(t, "coordinated-key", entry.ReconcileKey)
++
++	entry, ok = er.Get(legacyID)
++	require.True(t, ok)
++	require.False(t, entry.Coordinated())
++
++	byID := map[types.WorkflowID]bool{}
++	for _, e := range er.GetAll() {
++		byID[e.WorkflowID] = e.Coordinated()
++	}
++	require.Equal(t, map[types.WorkflowID]bool{legacyID: false, coordinatedID: true}, byID)
++
++	for _, e := range er.GetBySource("TestSource") {
++		require.Equal(t, e.WorkflowID == coordinatedID, e.Coordinated())
++	}
++
++	popped, err := er.Pop(coordinatedID)
++	require.NoError(t, err)
++	require.True(t, popped.Coordinated())
++
++	for _, e := range er.PopAll() {
++		require.False(t, e.Coordinated())
++	}
++}
++
++func TestCountEngines(t *testing.T) {
++	t.Parallel()
++
++	t.Run("empty registry", func(t *testing.T) {
++		t.Parallel()
++		require.Equal(t, engineCounts{}, countEngines(nil))
++	})
++
++	t.Run("mixed engine types", func(t *testing.T) {
++		t.Parallel()
++		engines := []ServiceWithMetadata{
++			{Service: &fakeCoordinatedDrainableEngine{}},
++			{Service: &fakeCoordinatedDrainableEngine{draining: true}},
++			{Service: &fakeDrainableService{}},
++			{Service: &fakeDrainableService{draining: true}},
++			{Service: &fakeService{}},
++			{Service: newTestShardFailoverManager(t, &mockEngine{})},
++		}
++		require.Equal(t, engineCounts{draining: 2, coordinated: 2, legacy: 4}, countEngines(engines))
++	})
++
++	t.Run("a sharded wrapper follows the engine it wraps", func(t *testing.T) {
++		t.Parallel()
++		engines := []ServiceWithMetadata{
++			{Service: newTestShardFailoverManager(t, &fakeCoordinatedDrainableEngine{})},
++		}
++		require.Equal(t, engineCounts{coordinated: 1}, countEngines(engines))
++	})
++}
+diff --git a/core/services/workflows/syncer/v2/handler.go b/core/services/workflows/syncer/v2/handler.go
+index f0ffcae60d5..cbb69bd4e6c 100644
+--- a/core/services/workflows/syncer/v2/handler.go
++++ b/core/services/workflows/syncer/v2/handler.go
+@@ -56,11 +56,9 @@ type ORM interface {
+ 	artifacts.WorkflowSpecsDS
+ }
+ 
+-// engineFactoryFn creates a workflow engine. The initDone channel is used to signal when the engine
+-// has completed initialization (including trigger subscriptions). For v2 engines, this is wired to
+-// the OnInitialized lifecycle hook. For v1 legacy DAG engines, nil is sent immediately after engine
+-// creation since they don't support async initialization hooks.
+-type engineFactoryFn func(ctx context.Context, wfid, owner string, name types.WorkflowName, tag string, config, binary []byte, binaryURL string, initDone chan<- error) (services.Service, error)
++// engineFactoryFn creates a workflow engine. The initDone channel is used to signal when
++// the engine has completed initialization; it is wired to the OnInitialized lifecycle hook.
++type engineFactoryFn func(ctx context.Context, wfid, owner string, name types.WorkflowName, tag string, config, binary []byte, binaryURL string, initDone chan<- error) (v2.WorkflowEngine, error)
+ 
+ type DrainableService interface {
+ 	Drain() bool
+@@ -77,19 +75,26 @@ type eventHandler struct {
+ 
+ 	lggr logger.Logger
+ 
+-	workflowStore          store.Store
+-	capRegistry            registry.CapabilitiesRegistry
+-	executionHandlers      *confidentialrelay.ExecutionHandlers
+-	donTimeStore           *dontime.Store
+-	useLocalTimeProvider   bool
+-	engineRegistry         *EngineRegistry
+-	emitter                custmsg.MessageEmitter
+-	emitterMu              sync.RWMutex
+-	engineFactory          engineFactoryFn
+-	engineLimiters         *v2.EngineLimiters
+-	featureFlags           *v2.EngineFeatureFlags
+-	ratelimiter            *ratelimiter.RateLimiter
+-	workflowLimits         limits.ResourceLimiter[int]
++	workflowStore        store.Store
++	capRegistry          registry.CapabilitiesRegistry
++	executionHandlers    *confidentialrelay.ExecutionHandlers
++	donTimeStore         *dontime.Store
++	useLocalTimeProvider bool
++	engineRegistry       *EngineRegistry
++	emitter              custmsg.MessageEmitter
++	emitterMu            sync.RWMutex
++	engineFactory        engineFactoryFn
++	engineLimiters       *v2.EngineLimiters
++	featureFlags         *v2.EngineFeatureFlags
++	ratelimiter          *ratelimiter.RateLimiter
++	workflowLimits       limits.ResourceLimiter[int]
++
++	// triggerCoordinator owns registration/handles/ACK for every workflow
++	// running the coordinated engine. Nil until wired via WithTriggerCoordinator.
++	// useCoordinatedEngine picks the legacy path when nil, regardless of the
++	// CoordinatedEngine flag.
++	triggerCoordinator TriggerCoordinator
++
+ 	workflowArtifactsStore WorkflowArtifactsStore
+ 	workflowEncryptionKey  workflowkey.Key
+ 	workflowDonSubscriber  capabilities.DonSubscriber
+@@ -152,9 +157,9 @@ func WithEngineFactoryFn(efn engineFactoryFn) func(*eventHandler) {
+ 	}
+ }
+ 
+-func WithStaticEngine(engine services.Service) func(*eventHandler) {
++func WithStaticEngine(engine v2.WorkflowEngine) func(*eventHandler) {
+ 	return func(e *eventHandler) {
+-		e.engineFactory = func(_ context.Context, _, _ string, _ types.WorkflowName, _ string, _, _ []byte, _ string, initDone chan<- error) (services.Service, error) {
++		e.engineFactory = func(_ context.Context, _, _ string, _ types.WorkflowName, _ string, _, _ []byte, _ string, initDone chan<- error) (v2.WorkflowEngine, error) {
+ 			// For static engines (used in tests), signal immediate initialization success
+ 			if initDone != nil {
+ 				initDone <- nil
+@@ -164,6 +169,16 @@ func WithStaticEngine(engine services.Service) func(*eventHandler) {
+ 	}
+ }
+ 
++// WithTriggerCoordinator wires the TriggerCoordinator used for every workflow
++// the CoordinatedEngine flag routes to the coordinated engine. Without
++// this option, tryEngineCreate always takes the legacy path, regardless of
++// the flag's value.
++func WithTriggerCoordinator(tc TriggerCoordinator) func(*eventHandler) {
++	return func(e *eventHandler) {
++		e.triggerCoordinator = tc
++	}
++}
++
+ func WithBillingClient(client metering.BillingClient) func(*eventHandler) {
+ 	return func(e *eventHandler) {
+ 		e.billingClient = client
+@@ -367,15 +382,15 @@ func NewEventHandler(
+ 		return nil, fmt.Errorf("new metrics: %w", metricsErr)
+ 	}
+ 	eh.metrics = metricsInst
+-	eh.engineFactory = eh.engineFactoryFn
++	eh.engineFactory = eh.newEngine
+ 	for _, o := range opts {
+ 		o(eh)
+ 	}
+ 
+ 	eh.Service, eh.eng = services.Config{
+ 		Name: "EventHandler",
+-		// The workflow store and the spec meter are started and stopped
+-		// alongside the handler.
++		// The workflow store, the spec meter and the trigger coordinator are
++		// started and stopped alongside the handler.
+ 		NewSubServices: func(logger.Logger) []services.Service {
+ 			var subs []services.Service
+ 			if eh.workflowStore != nil {
+@@ -384,6 +399,9 @@ func NewEventHandler(
+ 			if eh.specMeter != nil {
+ 				subs = append(subs, eh.specMeter)
+ 			}
++			if eh.triggerCoordinator != nil {
++				subs = append(subs, eh.triggerCoordinator)
++			}
+ 			return subs
+ 		},
+ 		Start: eh.start,
+@@ -855,9 +873,32 @@ func (h *eventHandler) fetchOrganizationID(ctx context.Context, workflowOwner st
+ 	return organizationID, nil
+ }
+ 
+-func (h *eventHandler) engineFactoryFn(ctx context.Context, workflowID, owner string, name types.WorkflowName, tag string, config, binary []byte, binaryURL string, initDone chan<- error) (services.Service, error) {
++// useCoordinatedEngine reads the CoordinatedEngine flag. A node without a
++// TriggerCoordinator always takes the legacy path, and so does a sharded node:
++// sharding and the coordinated engine are not yet compatible.
++func (h *eventHandler) useCoordinatedEngine(ctx context.Context, workflowID string) bool {
++	if h.triggerCoordinator == nil || h.featureFlags == nil || h.featureFlags.CoordinatedEngine == nil {
++		return false
++	}
++	if h.shardingEnabled && h.dispatcher != nil {
++		return false
++	}
++	open, err := h.featureFlags.CoordinatedEngine.IsOpen(ctx)
++	if err != nil {
++		h.lggr.Warnw("Could not evaluate CoordinatedEngine flag, falling back to the legacy engine",
++			"workflowID", workflowID, "err", err)
++		return false
++	}
++	return open
++}
++
++// buildEngineConfig builds the module stack (local WASM module plus the
++// confidential module) and the EngineConfig that the legacy and the
++// coordinated engine share.
++func (h *eventHandler) buildEngineConfig(ctx context.Context, workflowID, owner string, name types.WorkflowName, tag string, config, binary []byte, binaryURL string, initDone chan<- error) (*v2.EngineConfig, error) {
+ 	lggr := logger.Named(h.lggr, "WorkflowEngine.Module")
+ 	lggr = logger.With(lggr, "workflowID", workflowID, "workflowName", name, "workflowOwner", owner)
++
+ 	var sdkName string
+ 	moduleConfig := &host.ModuleConfig{
+ 		Logger:                               lggr,
+@@ -888,7 +929,6 @@ func (h *eventHandler) engineFactoryFn(ctx context.Context, workflowID, owner st
+ 
+ 	h.lggr.Debugw("Finished creating module for workflowID", "workflowID", workflowID)
+ 
+-	// V2 aka "NoDAG"
+ 	// Wrap the local WASM module in a RequirementSelectingModule that routes
+ 	// triggers with a TEE requirement to the ConfidentialModule (which delegates
+ 	// to the confidential-workflows capability and runs the WASM inside the
+@@ -912,6 +952,21 @@ func (h *eventHandler) engineFactoryFn(ctx context.Context, workflowID, owner st
+ 
+ 	h.wireInitDoneHook(cfg, initDone)
+ 
++	return cfg, nil
++}
++
++// newEngine is the default engineFactoryFn: it builds the module stack and
++// EngineConfig, wires sharding, and calls one of the two engine constructors.
++//
++// The coordinated engine registers no triggers itself:
++// tryCoordinatedEngineCreate hands it to the coordinator once it is in the
++// registry, and the coordinator calls Subscribe to obtain its subscriptions.
++func (h *eventHandler) newEngine(ctx context.Context, workflowID, owner string, name types.WorkflowName, tag string, config, binary []byte, binaryURL string, initDone chan<- error) (v2.WorkflowEngine, error) {
++	cfg, err := h.buildEngineConfig(ctx, workflowID, owner, name, tag, config, binary, binaryURL, initDone)
++	if err != nil {
++		return nil, err
++	}
++
+ 	var manager *ShardFailoverManager
+ 	if h.shardingEnabled && h.dispatcher != nil {
+ 		if h.shardFailoverComm == nil {
+@@ -935,7 +990,18 @@ func (h *eventHandler) engineFactoryFn(ctx context.Context, workflowID, owner st
+ 		manager.WireHooks(cfg)
+ 	}
+ 
+-	engine, err := v2.NewEngine(cfg)
++	construct := v2.NewEngine
++	if h.useCoordinatedEngine(ctx, workflowID) {
++		// The trigger coordinator is not implemented yet, so a workflow routed here
++		// will never receive triggers. Warn once per engine creation with the workflowID
++		h.lggr.Warnw("Routing workflow to the coordinated engine; trigger delivery is not implemented yet",
++			"workflowID", workflowID, "workflowName", name, "workflowOwner", owner)
++
++		cfg.TriggerAcknowledger = h.triggerCoordinator
++		construct = v2.NewCoordinatedEngine
++	}
++
++	engine, err := construct(cfg)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -981,6 +1047,14 @@ func (h *eventHandler) stopEngine(ctx context.Context, workflowID types.Workflow
+ 	e, ok := h.engineRegistry.Get(workflowID)
+ 	var drainable DrainableService
+ 	if ok {
++		// on coordinated engines, stop coordinator ingress before draining,
++		// so the drain can actually reach zero active executions.
++		if e.Coordinated() && h.triggerCoordinator != nil {
++			if err := h.triggerCoordinator.UnregisterTriggers(workflowID.Hex()); err != nil && !errors.Is(err, ErrWorkflowNotCoordinated) {
++				h.lggr.Errorw("Failed to unregister triggers via coordinator", "workflowID", workflowID.String(), "err", err)
++			}
++		}
++
+ 		var isDrainable bool
+ 		if drainable, isDrainable = e.Service.(DrainableService); isDrainable {
+ 			if started := drainable.Drain(); started {
+@@ -1106,6 +1180,16 @@ func (h *eventHandler) tryEngineCleanup(workflowID types.WorkflowID) error {
+ 		return nil
+ 	}
+ 
++	// Unregister before close, same as stopEngine.
++	// This path (reconcile-to-inactive, replace-draining-engine) must mirror
++	// stopEngine's coordinator handling, or trigger registrations are left
++	// orphaned on this path alone.
++	if e.Coordinated() && h.triggerCoordinator != nil {
++		if err := h.triggerCoordinator.UnregisterTriggers(workflowID.Hex()); err != nil && !errors.Is(err, ErrWorkflowNotCoordinated) {
++			h.lggr.Errorw("Failed to unregister triggers via coordinator", "workflowID", workflowID.String(), "err", err)
++		}
++	}
++
+ 	// Close the engine, then remove it from the registry only once cleanup has succeeded. The
+ 	// registry entry is what tells us this workflow still needs cleanup, so if a step fails we
+ 	// leave it in place and return the error, allowing a future attempt to retry in case the
+@@ -1134,9 +1218,22 @@ func (h *eventHandler) cleanupModuleCache(workflowID string) {
+ 	}
+ }
+ 
++// engineInputs is the validated, decoded form of a WorkflowSpec that both
++// engine creation paths start from.
++type engineInputs struct {
++	wid          types.WorkflowID
++	workflowName types.WorkflowName
++	binary       []byte
++	config       []byte
++	reconcileKey string
++}
++
+ // tryEngineCreate attempts to create a new workflow engine, start it, and register it with the engine registry.
+ // This function waits for the engine to complete initialization (including trigger subscriptions) before returning,
+ // ensuring that the workflowActivated event accurately reflects the deployment status including trigger registration.
++//
++// The CoordinatedEngine flag is read here, once, and decides between the legacy
++// and the coordinated creation path.
+ func (h *eventHandler) tryEngineCreate(ctx context.Context, spec *job.WorkflowSpec, source string) error {
+ 	ctx, span := h.tracer.Start(ctx, "engine_create",
+ 		trace.WithAttributes(
+@@ -1146,15 +1243,102 @@ func (h *eventHandler) tryEngineCreate(ctx context.Context, spec *job.WorkflowSp
+ 		))
+ 	defer span.End()
+ 
++	in, err := h.prepareEngineInputs(ctx, spec)
++	if err != nil {
++		return err
++	}
++
++	initDone := make(chan error, 1)
++	engine, err := h.engineFactory(ctx, spec.WorkflowID, spec.WorkflowOwner, in.workflowName, spec.WorkflowTag, in.config, in.binary, spec.BinaryURL, initDone)
++	if err != nil {
++		return fmt.Errorf("failed to create workflow engine: %w", err)
++	}
++
++	if engine.IsCoordinated() {
++		return h.tryCoordinatedEngineCreate(ctx, spec, source, in, engine, initDone)
++	}
++	return h.tryLegacyEngineCreate(ctx, spec, source, in, engine, initDone)
++}
++
++// tryLegacyEngineCreate finishes creation for an engine that registers its own
++// triggers while it starts, so it is done once the engine is in the registry.
++func (h *eventHandler) tryLegacyEngineCreate(ctx context.Context, spec *job.WorkflowSpec, source string, in *engineInputs, engine v2.WorkflowEngine, initDone <-chan error) error {
++	if err := h.startEngine(ctx, spec.WorkflowID, engine, initDone); err != nil {
++		return err
++	}
++
++	if err := h.engineRegistry.AddWithReconcileKey(in.wid, source, in.reconcileKey, engine); err != nil {
++		return h.registryAddFailed(in.wid, source, engine, err)
++	}
++	return nil
++}
++
++// tryCoordinatedEngineCreate finishes creation for an engine that registers no triggers itself.
++func (h *eventHandler) tryCoordinatedEngineCreate(ctx context.Context, spec *job.WorkflowSpec, source string, in *engineInputs, engine v2.WorkflowEngine, initDone <-chan error) error {
++	if err := h.startEngine(ctx, spec.WorkflowID, engine, initDone); err != nil {
++		return err
++	}
++
++	if err := h.engineRegistry.AddWithReconcileKey(in.wid, source, in.reconcileKey, engine); err != nil {
++		return h.registryAddFailed(in.wid, source, engine, err)
++	}
++
++	cleanup := func(location string) {
++		if _, innerErr := h.engineRegistry.Pop(in.wid); innerErr != nil {
++			h.lggr.Warnw(fmt.Sprintf("Failed to pop engine from registry after %s failure", location), "workflowID", in.wid.Hex(), "err", innerErr)
++		}
++		if innerErr := engine.Close(); innerErr != nil {
++			h.lggr.Warnw(fmt.Sprintf("Failed to close engine after %s failure", location), "workflowID", in.wid.Hex(), "err", innerErr)
++		}
++	}
++
++	// Registration happens here, now that the engine is already in the
++	// registry, so the coordinator's readers can resolve it for the first
++	// event. RegisterTriggers calls the engine's Subscribe itself — the WASM
++	// call is scoped to the one workflow it describes, which matters because
++	// Handle runs on a worker pool and several workflows reach this point
++	// concurrently.
++	localNode, err := h.capRegistry.LocalNode(ctx)
++	if err != nil {
++		cleanup("local node resolution")
++		return fmt.Errorf("failed to resolve local node DON ID for trigger registration: %w", err)
++	}
++	donID := localNode.WorkflowDON.ID
++
++	triggerIDs, err := h.triggerCoordinator.RegisterTriggers(ctx, engine, RegistrationParams{
++		WorkflowOwner:       spec.WorkflowOwner,
++		WorkflowName:        in.workflowName.Hex(),
++		DecodedWorkflowName: in.workflowName.String(),
++		WorkflowTag:         spec.WorkflowTag,
++		WorkflowDonID:       donID,
++		// pinnedWorkflowDonConfigVersion in v2 pins this to 1 to avoid forcing
++		// forwarder updates on config churn; mirrored here since the syncer
++		// can't reference that unexported v2 constant.
++		WorkflowDonConfigVersion:      1,
++		WorkflowRegistryChainSelector: h.workflowRegistryChainSelector,
++		WorkflowRegistryAddress:       h.workflowRegistryAddress,
++	})
++	if err != nil {
++		cleanup("trigger registration")
++		return fmt.Errorf("failed to register triggers via coordinator: %w", err)
++	}
++	h.lggr.Infow("Registered triggers via coordinator", "workflowID", in.wid.Hex(), "triggerIDs", triggerIDs)
++	return nil
++}
++
++// prepareEngineInputs decodes and validates the spec before any engine is
++// built: the binary, owner and name must decode, and the workflow ID must
++// match the one derived from the stored artifacts.
++func (h *eventHandler) prepareEngineInputs(ctx context.Context, spec *job.WorkflowSpec) (*engineInputs, error) {
+ 	// Ensure the capabilities registry is ready before creating any Engine instances.
+ 	// This should be guaranteed by the Workflow Registry Syncer.
+ 	if err := h.ensureCapRegistryReady(ctx); err != nil {
+-		return fmt.Errorf("failed to ensure capabilities registry is ready: %w", err)
++		return nil, fmt.Errorf("failed to ensure capabilities registry is ready: %w", err)
+ 	}
+ 
+ 	decodedBinary, err := hex.DecodeString(spec.Workflow)
+ 	if err != nil {
+-		return nonRetryable(fmt.Errorf("failed to decode workflow spec binary: %w", err))
++		return nil, nonRetryable(fmt.Errorf("failed to decode workflow spec binary: %w", err))
+ 	}
+ 	// Free the hex-encoded binary string as it is not needed beyond this decode
+ 	spec.Workflow = ""
+@@ -1166,88 +1350,91 @@ func (h *eventHandler) tryEngineCreate(ctx context.Context, spec *job.WorkflowSp
+ 	// Workflow ID should match what is generated from the stored artifacts
+ 	ownerBytes, err := hex.DecodeString(spec.WorkflowOwner)
+ 	if err != nil {
+-		return nonRetryable(fmt.Errorf("failed to decode owner: %w", err))
++		return nil, nonRetryable(fmt.Errorf("failed to decode owner: %w", err))
+ 	}
+ 	configBytes := []byte(spec.Config)
+ 	hash, err := pkgworkflows.GenerateWorkflowID(ownerBytes, spec.WorkflowName, decodedBinary, configBytes, secretsURL)
+ 	if err != nil {
+-		return fmt.Errorf("failed to generate workflow id: %w", err)
++		return nil, fmt.Errorf("failed to generate workflow id: %w", err)
+ 	}
+ 	wid, err := types.WorkflowIDFromHex(spec.WorkflowID)
+ 	if err != nil {
+-		return nonRetryable(fmt.Errorf("invalid workflow id: %w", err))
++		return nil, nonRetryable(fmt.Errorf("invalid workflow id: %w", err))
+ 	}
+ 	if !types.WorkflowID(hash).Equal(wid) {
+-		return nonRetryable(fmt.Errorf("workflowID mismatch: %s != %s", types.WorkflowID(hash).Hex(), wid.Hex()))
++		return nil, nonRetryable(fmt.Errorf("workflowID mismatch: %s != %s", types.WorkflowID(hash).Hex(), wid.Hex()))
+ 	}
+ 
+-	// Start a new WorkflowEngine instance, and add it to local engine registry
+ 	workflowName, err := types.NewWorkflowName(spec.WorkflowName)
+ 	if err != nil {
+-		return nonRetryable(fmt.Errorf("invalid workflow name: %w", err))
++		return nil, nonRetryable(fmt.Errorf("invalid workflow name: %w", err))
+ 	}
+ 
+-	// Create a channel to receive the initialization result.
+-	// This allows us to wait for the engine to complete initialization (including trigger subscriptions)
+-	// before emitting the workflowActivated event, ensuring the event accurately reflects deployment status.
+-	initDone := make(chan error, 1)
+-	var engine services.Service
+-
+-	engine, err = h.engineFactory(ctx, spec.WorkflowID, spec.WorkflowOwner, workflowName, spec.WorkflowTag, configBytes, decodedBinary, spec.BinaryURL, initDone)
++	// Identity fingerprint stored alongside the engine in the registry.
++	reconcileKey, err := ReconcileKey(ownerBytes, spec.WorkflowName)
+ 	if err != nil {
+-		return fmt.Errorf("failed to create workflow engine: %w", err)
++		return nil, fmt.Errorf("failed to compute reconcile key: %w", err)
+ 	}
+ 
+-	if err = engine.Start(ctx); err != nil {
++	return &engineInputs{
++		wid:          wid,
++		workflowName: workflowName,
++		binary:       decodedBinary,
++		config:       configBytes,
++		reconcileKey: reconcileKey,
++	}, nil
++}
++
++// startEngine starts engine and waits for it to complete initialization
++// (including trigger subscriptions), so we don't emit workflowActivated events
++// before the engine initializes successfully. The engine is closed if
++// initialization fails or ctx is cancelled first.
++func (h *eventHandler) startEngine(ctx context.Context, workflowID string, engine services.Service, initDone <-chan error) error {
++	if err := engine.Start(ctx); err != nil {
+ 		return fmt.Errorf("failed to start workflow engine: %w", err)
+ 	}
+ 
+-	// Wait for the engine to complete initialization (including trigger subscriptions).
+-	// This ensures we don't emit workflowActivated events before the engine initializes successfully.
+ 	select {
+ 	case <-ctx.Done():
+ 		// Context cancelled while waiting for initialization
+ 		if closeErr := engine.Close(); closeErr != nil {
+-			h.lggr.Errorw("failed to close engine after context cancellation", "error", closeErr, "workflowID", spec.WorkflowID)
++			h.lggr.Errorw("failed to close engine after context cancellation", "error", closeErr, "workflowID", workflowID)
+ 		}
+ 		return fmt.Errorf("context cancelled while waiting for engine initialization: %w", ctx.Err())
+ 	case initErr := <-initDone:
+ 		if initErr != nil {
+ 			// Engine initialization failed (e.g., trigger subscription failed)
+ 			if closeErr := engine.Close(); closeErr != nil {
+-				h.lggr.Errorw("failed to close engine after initialization failure", "error", closeErr, "workflowID", spec.WorkflowID)
++				h.lggr.Errorw("failed to close engine after initialization failure", "error", closeErr, "workflowID", workflowID)
+ 			}
+ 			return fmt.Errorf("engine initialization failed: %w", initErr)
+ 		}
+ 	}
++	return nil
++}
+ 
+-	// Engine is fully initialized, add to registry with source tracking and identity fingerprint
+-	reconcileKey, err := ReconcileKey(ownerBytes, spec.WorkflowName)
+-	if err != nil {
+-		return fmt.Errorf("failed to compute reconcile key: %w", err)
+-	}
+-	if err := h.engineRegistry.AddWithReconcileKey(wid, source, reconcileKey, engine); err != nil {
+-		if closeErr := engine.Close(); closeErr != nil {
+-			return fmt.Errorf("failed to close workflow engine: %w during invariant violation: %w", closeErr, err)
+-		}
+-
+-		// Check for WorkflowID collision across sources
+-		if errors.Is(err, ErrAlreadyExists) {
+-			existingEntry, found := h.engineRegistry.Get(wid)
+-			if found {
+-				h.lggr.Warnw("WorkflowID collision detected: workflow already exists from different source",
+-					"workflowID", wid.Hex(),
+-					"attemptedSource", source,
+-					"existingSource", existingEntry.Source,
+-					"hint", "Each workflow ID should only be registered from a single source. Check your workflow configurations for duplicates.")
+-			}
++// registryAddFailed closes an engine the registry refused and returns the
++// error to report. Both creation paths share it.
++func (h *eventHandler) registryAddFailed(wid types.WorkflowID, source string, engine services.Service, err error) error {
++	if closeErr := engine.Close(); closeErr != nil {
++		return fmt.Errorf("failed to close workflow engine: %w during invariant violation: %w", closeErr, err)
++	}
++
++	// Check for WorkflowID collision across sources
++	if errors.Is(err, ErrAlreadyExists) {
++		existingEntry, found := h.engineRegistry.Get(wid)
++		if found {
++			h.lggr.Warnw("WorkflowID collision detected: workflow already exists from different source",
++				"workflowID", wid.Hex(),
++				"attemptedSource", source,
++				"existingSource", existingEntry.Source,
++				"hint", "Each workflow ID should only be registered from a single source. Check your workflow configurations for duplicates.")
+ 		}
+-
+-		// This shouldn't happen because we call the handler serially and
+-		// check for running engines above, see the call to engineRegistry.Contains.
+-		return fmt.Errorf("invariant violation: %w", err)
+ 	}
+-	return nil
++
++	// This shouldn't happen because we call the handler serially and
++	// check for running engines above, see the call to engineRegistry.Contains.
++	return fmt.Errorf("invariant violation: %w", err)
+ }
+ 
+ func (h *eventHandler) overrideFetcherForOwner(owner string) v2.SecretsFetcher {
+diff --git a/core/services/workflows/syncer/v2/handler_engine_create_test.go b/core/services/workflows/syncer/v2/handler_engine_create_test.go
+new file mode 100644
+index 00000000000..50939ee7921
+--- /dev/null
++++ b/core/services/workflows/syncer/v2/handler_engine_create_test.go
+@@ -0,0 +1,276 @@
++package v2
++
++import (
++	"context"
++	"encoding/hex"
++	"errors"
++	"sync/atomic"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++	"go.opentelemetry.io/otel/trace/noop"
++
++	capreg "github.com/smartcontractkit/chainlink-common/pkg/capabilities/registry"
++	"github.com/smartcontractkit/chainlink-common/pkg/logger"
++	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
++	pkgworkflows "github.com/smartcontractkit/chainlink-common/pkg/workflows"
++	"github.com/smartcontractkit/chainlink/v2/core/services/job"
++	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/types"
++	v2 "github.com/smartcontractkit/chainlink/v2/core/services/workflows/v2"
++)
++
++// fakeCoordinatedEngine is a v2.WorkflowEngine that reports as coordinated.
++// Only the lifecycle methods tryEngineCreate calls are implemented.
++type fakeCoordinatedEngine struct {
++	v2.WorkflowEngine
++	closed atomic.Bool
++}
++
++func (f *fakeCoordinatedEngine) Start(context.Context) error { return nil }
++
++func (f *fakeCoordinatedEngine) Close() error {
++	f.closed.Store(true)
++	return nil
++}
++
++func (f *fakeCoordinatedEngine) IsCoordinated() bool { return true }
++
++// recordingCoordinator records the subscribers handed to RegisterTriggers.
++type recordingCoordinator struct {
++	TriggerCoordinator
++	registerErr error
++	registered  []v2.Subscriber
++}
++
++func (c *recordingCoordinator) RegisterTriggers(_ context.Context, subscriber v2.Subscriber, _ RegistrationParams) ([]string, error) {
++	c.registered = append(c.registered, subscriber)
++	return nil, c.registerErr
++}
++
++// nodeConfig is the node state that decides the routing policy.
++type nodeConfig struct {
++	flagOpen        bool
++	withCoordinator bool
++	sharded         bool
++}
++
++// engineCreateFixture is an eventHandler whose engine factory mirrors the real
++// one's contract: it reads the routing policy itself and returns the matching
++// engine, leaving tryEngineCreate to route on the engine's IsCoordinated.
++type engineCreateFixture struct {
++	h                 *eventHandler
++	legacyEngine      v2.WorkflowEngine
++	coordinatedEngine *fakeCoordinatedEngine
++	factoryCalls      atomic.Int32
++	factoryErr        error
++	coordinator       *recordingCoordinator
++}
++
++func newEngineCreateFixture(t *testing.T, cfg nodeConfig) *engineCreateFixture {
++	t.Helper()
++	lggr := logger.Test(t)
++	registry := capreg.NewRegistry(lggr)
++	registry.SetRegistryMetadata(&capreg.TestRegistryMetadata{})
++
++	f := &engineCreateFixture{
++		legacyEngine:      &mockEngine{},
++		coordinatedEngine: &fakeCoordinatedEngine{},
++	}
++	// A sharded node gets the ShardFailoverManager wrapper, as the real factory
++	// builds it.
++	if cfg.sharded {
++		f.legacyEngine = newTestShardFailoverManager(t, &mockEngine{})
++	}
++
++	f.h = &eventHandler{
++		lggr:           lggr,
++		capRegistry:    registry,
++		engineRegistry: NewEngineRegistry(),
++		featureFlags:   &v2.EngineFeatureFlags{CoordinatedEngine: limits.NewGateLimiter(cfg.flagOpen)},
++		tracer:         noop.NewTracerProvider().Tracer(""),
++		engineFactory: func(ctx context.Context, wfid, _ string, _ types.WorkflowName, _ string, _, _ []byte, _ string, initDone chan<- error) (v2.WorkflowEngine, error) {
++			f.factoryCalls.Add(1)
++			if f.factoryErr != nil {
++				return nil, f.factoryErr
++			}
++			initDone <- nil
++			if f.h.useCoordinatedEngine(ctx, wfid) {
++				return f.coordinatedEngine, nil
++			}
++			return f.legacyEngine, nil
++		},
++	}
++	if cfg.withCoordinator {
++		f.coordinator = &recordingCoordinator{}
++		f.h.triggerCoordinator = f.coordinator
++	}
++	if cfg.sharded {
++		f.h.shardingEnabled = true
++		f.h.dispatcher = newFakeDispatcher()
++	}
++	return f
++}
++
++// newTestWorkflowSpec returns a spec whose workflow ID matches its artifacts,
++// so it passes prepareEngineInputs.
++func newTestWorkflowSpec(t *testing.T) (*job.WorkflowSpec, types.WorkflowID) {
++	t.Helper()
++	owner := []byte{0x01, 0x02, 0x03}
++	name := "engine-create-test"
++	binary := []byte("binary")
++	config := []byte("config")
++	id, err := pkgworkflows.GenerateWorkflowID(owner, name, binary, config, "")
++	require.NoError(t, err)
++	wid := types.WorkflowID(id)
++	return &job.WorkflowSpec{
++		Workflow:      hex.EncodeToString(binary),
++		Config:        string(config),
++		WorkflowID:    wid.Hex(),
++		WorkflowOwner: hex.EncodeToString(owner),
++		WorkflowName:  name,
++	}, wid
++}
++
++func Test_tryEngineCreate_routing(t *testing.T) {
++	t.Parallel()
++
++	t.Run("flag open with a coordinator takes the coordinated path", func(t *testing.T) {
++		t.Parallel()
++		f := newEngineCreateFixture(t, nodeConfig{flagOpen: true, withCoordinator: true})
++		spec, wid := newTestWorkflowSpec(t)
++
++		require.NoError(t, f.h.tryEngineCreate(t.Context(), spec, "TestSource"))
++
++		require.Equal(t, int32(1), f.factoryCalls.Load())
++		entry, ok := f.h.engineRegistry.Get(wid)
++		require.True(t, ok)
++		require.True(t, entry.Coordinated())
++		require.NotEmpty(t, entry.ReconcileKey)
++		require.Equal(t, []v2.Subscriber{f.coordinatedEngine}, f.coordinator.registered)
++	})
++
++	t.Run("flag closed takes the legacy path", func(t *testing.T) {
++		t.Parallel()
++		f := newEngineCreateFixture(t, nodeConfig{flagOpen: false, withCoordinator: true})
++		spec, wid := newTestWorkflowSpec(t)
++
++		require.NoError(t, f.h.tryEngineCreate(t.Context(), spec, "TestSource"))
++
++		require.Equal(t, int32(1), f.factoryCalls.Load())
++		entry, ok := f.h.engineRegistry.Get(wid)
++		require.True(t, ok)
++		require.False(t, entry.Coordinated())
++		require.Empty(t, f.coordinator.registered)
++	})
++
++	t.Run("flag open without a coordinator takes the legacy path", func(t *testing.T) {
++		t.Parallel()
++		f := newEngineCreateFixture(t, nodeConfig{flagOpen: true, withCoordinator: false})
++		spec, wid := newTestWorkflowSpec(t)
++
++		require.NoError(t, f.h.tryEngineCreate(t.Context(), spec, "TestSource"))
++
++		entry, ok := f.h.engineRegistry.Get(wid)
++		require.True(t, ok)
++		require.False(t, entry.Coordinated())
++	})
++
++	t.Run("a sharded node stays on the legacy path with the flag open", func(t *testing.T) {
++		t.Parallel()
++		f := newEngineCreateFixture(t, nodeConfig{flagOpen: true, withCoordinator: true, sharded: true})
++		spec, wid := newTestWorkflowSpec(t)
++
++		require.NoError(t, f.h.tryEngineCreate(t.Context(), spec, "TestSource"))
++
++		entry, ok := f.h.engineRegistry.Get(wid)
++		require.True(t, ok)
++		require.IsType(t, &ShardFailoverManager{}, entry.Service)
++		require.False(t, entry.Coordinated(), "a sharded engine must never classify as coordinated")
++		require.Empty(t, f.coordinator.registered, "the coordinator must not be used on a sharded node")
++		require.Equal(t, engineCounts{legacy: 1}, countEngines(f.h.engineRegistry.GetAll()))
++	})
++
++	t.Run("RegisterTriggers failure removes and closes the coordinated engine", func(t *testing.T) {
++		t.Parallel()
++		f := newEngineCreateFixture(t, nodeConfig{flagOpen: true, withCoordinator: true})
++		f.coordinator.registerErr = errors.New("boom")
++		spec, wid := newTestWorkflowSpec(t)
++
++		err := f.h.tryEngineCreate(t.Context(), spec, "TestSource")
++
++		require.ErrorContains(t, err, "failed to register triggers via coordinator")
++		require.False(t, f.h.engineRegistry.Contains(wid))
++		require.True(t, f.coordinatedEngine.closed.Load())
++	})
++
++	t.Run("a factory failure is reported and registers nothing", func(t *testing.T) {
++		t.Parallel()
++		f := newEngineCreateFixture(t, nodeConfig{withCoordinator: true})
++		f.factoryErr = errors.New("boom")
++		spec, wid := newTestWorkflowSpec(t)
++
++		err := f.h.tryEngineCreate(t.Context(), spec, "TestSource")
++
++		require.ErrorContains(t, err, "failed to create workflow engine")
++		require.False(t, f.h.engineRegistry.Contains(wid))
++	})
++
++	t.Run("invalid spec is rejected before any engine is built", func(t *testing.T) {
++		t.Parallel()
++		f := newEngineCreateFixture(t, nodeConfig{withCoordinator: true})
++		spec, _ := newTestWorkflowSpec(t)
++		spec.WorkflowID = types.WorkflowID{0xff}.Hex()
++
++		err := f.h.tryEngineCreate(t.Context(), spec, "TestSource")
++
++		require.ErrorContains(t, err, "workflowID mismatch")
++		require.Equal(t, int32(0), f.factoryCalls.Load())
++	})
++}
++
++// Test_useCoordinatedEngine covers the routing policy the engine factory reads.
++func Test_useCoordinatedEngine(t *testing.T) {
++	t.Parallel()
++
++	newHandler := func(flagOpen, withCoordinator, sharded bool) *eventHandler {
++		h := &eventHandler{
++			lggr:         logger.Test(t),
++			featureFlags: &v2.EngineFeatureFlags{CoordinatedEngine: limits.NewGateLimiter(flagOpen)},
++		}
++		if withCoordinator {
++			h.triggerCoordinator = &recordingCoordinator{}
++		}
++		if sharded {
++			h.shardingEnabled = true
++			h.dispatcher = newFakeDispatcher()
++		}
++		return h
++	}
++
++	t.Run("flag open with a coordinator", func(t *testing.T) {
++		t.Parallel()
++		require.True(t, newHandler(true, true, false).useCoordinatedEngine(t.Context(), "wfid"))
++	})
++
++	t.Run("flag closed", func(t *testing.T) {
++		t.Parallel()
++		require.False(t, newHandler(false, true, false).useCoordinatedEngine(t.Context(), "wfid"))
++	})
++
++	t.Run("no coordinator wired", func(t *testing.T) {
++		t.Parallel()
++		require.False(t, newHandler(true, false, false).useCoordinatedEngine(t.Context(), "wfid"))
++	})
++
++	t.Run("sharded nodes stay on the legacy engine", func(t *testing.T) {
++		t.Parallel()
++		require.False(t, newHandler(true, true, true).useCoordinatedEngine(t.Context(), "wfid"))
++	})
++
++	t.Run("nil feature flags", func(t *testing.T) {
++		t.Parallel()
++		h := newHandler(true, true, false)
++		h.featureFlags = nil
++		require.False(t, h.useCoordinatedEngine(t.Context(), "wfid"))
++	})
++}
+diff --git a/core/services/workflows/syncer/v2/handler_test.go b/core/services/workflows/syncer/v2/handler_test.go
+index 4943d276db7..59146bafca7 100644
+--- a/core/services/workflows/syncer/v2/handler_test.go
++++ b/core/services/workflows/syncer/v2/handler_test.go
+@@ -65,6 +65,7 @@ import (
+ 	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/syncerlimiter"
+ 	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/types"
+ 	v2 "github.com/smartcontractkit/chainlink/v2/core/services/workflows/v2"
++	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/v2/triggers"
+ )
+ 
+ type mockFetchResp struct {
+@@ -125,6 +126,22 @@ func (m *mockEngine) HealthReport() map[string]error { return nil }
+ 
+ func (m *mockEngine) Name() string { return "mockEngine" }
+ 
++func (m *mockEngine) ExecuteTrigger(context.Context, triggers.CoordinatedEvent) error { return nil }
++
++func (m *mockEngine) Subscribe(context.Context) ([]*sdk.TriggerSubscription, error) {
++	return nil, nil
++}
++
++func (m *mockEngine) Tenant() contexts.CRE { return contexts.CRE{} }
++
++func (m *mockEngine) Drain() bool { return false }
++
++func (m *mockEngine) ActiveExecutions() int32 { return 0 }
++
++func (m *mockEngine) DrainStartedAt() (time.Time, bool) { return time.Time{}, false }
++
++func (m *mockEngine) IsCoordinated() bool { return false }
++
+ type mockDrainableEngine struct {
+ 	mockEngine
+ 	draining         atomic.Bool
+@@ -162,7 +179,7 @@ func (m *mockDrainableEngine) Close() error {
+ 
+ // mockEngineFactory returns a standard mock engine factory for tests.
+ // It sends nil to initDone to signal successful initialization.
+-func mockEngineFactory(ctx context.Context, wfid, owner string, name types.WorkflowName, tag string, config, binary []byte, binaryURL string, initDone chan<- error) (services.Service, error) {
++func mockEngineFactory(ctx context.Context, wfid, owner string, name types.WorkflowName, tag string, config, binary []byte, binaryURL string, initDone chan<- error) (v2.WorkflowEngine, error) {
+ 	if initDone != nil {
+ 		initDone <- nil
+ 	}
+@@ -317,7 +334,7 @@ func Test_workflowRegisteredHandler(t *testing.T) {
+ 					signedConfigURL:                      {Body: config, Err: nil},
+ 				})
+ 			},
+-			engineFactoryFn: func(ctx context.Context, wfid, owner string, name types.WorkflowName, tag string, config, binary []byte, binaryURL string, initDone chan<- error) (services.Service, error) {
++			engineFactoryFn: func(ctx context.Context, wfid, owner string, name types.WorkflowName, tag string, config, binary []byte, binaryURL string, initDone chan<- error) (v2.WorkflowEngine, error) {
+ 				if _, err := hex.DecodeString(name.Hex()); err != nil {
+ 					return nil, fmt.Errorf("invalid workflow name: %w", err)
+ 				}
+@@ -361,7 +378,7 @@ func Test_workflowRegisteredHandler(t *testing.T) {
+ 					signedConfigURL:                      {Body: config, Err: nil},
+ 				})
+ 			},
+-			engineFactoryFn: func(ctx context.Context, wfid, owner string, name types.WorkflowName, tag string, config, binary []byte, binaryURL string, initDone chan<- error) (services.Service, error) {
++			engineFactoryFn: func(ctx context.Context, wfid, owner string, name types.WorkflowName, tag string, config, binary []byte, binaryURL string, initDone chan<- error) (v2.WorkflowEngine, error) {
+ 				if initDone != nil {
+ 					initDone <- nil
+ 				}
+@@ -960,7 +977,7 @@ type testCase struct {
+ 	fetcherFactory   func(wfID []byte) *mockFetcher
+ 	Event            func(wfID []byte, wfName string, wfOwner []byte) WorkflowRegisteredEvent
+ 	validationFn     func(t *testing.T, ctx context.Context, event WorkflowRegisteredEvent, h *eventHandler, s *artifacts.Store, wfOwner []byte, wfName string, wfID types.WorkflowID, fetcher *mockFetcher, binaryURL, configURL string)
+-	engineFactoryFn  func(ctx context.Context, wfid, owner string, name types.WorkflowName, tag string, config, binary []byte, binaryURL string, initDone chan<- error) (services.Service, error)
++	engineFactoryFn  func(ctx context.Context, wfid, owner string, name types.WorkflowName, tag string, config, binary []byte, binaryURL string, initDone chan<- error) (v2.WorkflowEngine, error)
+ }
+ 
+ func testRunningWorkflow(t *testing.T, tc testCase) {
+diff --git a/core/services/workflows/syncer/v2/metrics.go b/core/services/workflows/syncer/v2/metrics.go
+index 9485daf2651..76f22eb9978 100644
+--- a/core/services/workflows/syncer/v2/metrics.go
++++ b/core/services/workflows/syncer/v2/metrics.go
+@@ -11,16 +11,27 @@ import (
+ 	"github.com/smartcontractkit/chainlink-common/pkg/beholder"
+ )
+ 
++// engineType label values for the running-engines gauge.
++const (
++	engineTypeCoordinated = "coordinated"
++	engineTypeLegacy      = "legacy"
++)
++
+ type metrics struct {
+ 	handleDuration    metric.Int64Histogram
+ 	fetchedWorkflows  metric.Int64Gauge
+ 	runningWorkflows  metric.Int64Gauge
+ 	drainingWorkflows metric.Int64Gauge
+-	completedSyncs    metric.Int64Counter
+-	drainStarted      metric.Int64Counter
+-	drainCompleted    metric.Int64Counter
+-	drainDuration     metric.Int64Histogram
+-	deleteDeferred    metric.Int64Counter
++	// runningEngines counts the engines currently in the registry, split by
++	// engineType ("coordinated" or "legacy"). Both series are always reported,
++	// including the zeroes, so an absent series means the node stopped
++	// reporting rather than "no engines of that type".
++	runningEngines metric.Int64Gauge
++	completedSyncs metric.Int64Counter
++	drainStarted   metric.Int64Counter
++	drainCompleted metric.Int64Counter
++	drainDuration  metric.Int64Histogram
++	deleteDeferred metric.Int64Counter
+ 
+ 	// Per-source metrics for multi-source observability
+ 	sourceHealth        metric.Int64Gauge     // 1=healthy, 0=unhealthy per source
+@@ -62,6 +73,19 @@ func (m *metrics) recordDrainingWorkflows(ctx context.Context, count int) {
+ 	m.drainingWorkflows.Record(ctx, int64(count))
+ }
+ 
++// recordRunningEngines reports the engine-type split of the registry. Called
++// once per reconciliation tick, with both counts, so the two series stay in
++// lockstep and "coordinated == 0" is an assertion the alert can rely on rather
++// than the absence of a sample.
++func (m *metrics) recordRunningEngines(ctx context.Context, coordinated, legacy int) {
++	m.runningEngines.Record(ctx, int64(coordinated), metric.WithAttributes(
++		attribute.String("engineType", engineTypeCoordinated),
++	))
++	m.runningEngines.Record(ctx, int64(legacy), metric.WithAttributes(
++		attribute.String("engineType", engineTypeLegacy),
++	))
++}
++
+ func (m *metrics) incrementCompletedSyncs(ctx context.Context) {
+ 	m.completedSyncs.Add(ctx, 1)
+ }
+@@ -288,6 +312,11 @@ func newMetrics() (*metrics, error) {
+ 		return nil, err
+ 	}
+ 
++	runningEngines, err := beholder.GetMeter().Int64Gauge("platform_workflow_registry_syncer_running_engines")
++	if err != nil {
++		return nil, err
++	}
++
+ 	completedSyncs, err := beholder.GetMeter().Int64Counter("platform_workflow_registry_syncer_completed_syncs_total")
+ 	if err != nil {
+ 		return nil, err
+@@ -374,6 +403,7 @@ func newMetrics() (*metrics, error) {
+ 		fetchedWorkflows:          fetchedWorkflows,
+ 		runningWorkflows:          runningWorkflows,
+ 		drainingWorkflows:         drainingWorkflows,
++		runningEngines:            runningEngines,
+ 		completedSyncs:            completedSyncs,
+ 		drainStarted:              drainStarted,
+ 		drainCompleted:            drainCompleted,
+diff --git a/core/services/workflows/syncer/v2/shard_failover_manager.go b/core/services/workflows/syncer/v2/shard_failover_manager.go
+index 987f359816e..dcf2b5116c8 100644
+--- a/core/services/workflows/syncer/v2/shard_failover_manager.go
++++ b/core/services/workflows/syncer/v2/shard_failover_manager.go
+@@ -8,9 +8,11 @@ import (
+ 	"time"
+ 
+ 	commoncap "github.com/smartcontractkit/chainlink-common/pkg/capabilities"
++	"github.com/smartcontractkit/chainlink-common/pkg/contexts"
+ 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+ 	"github.com/smartcontractkit/chainlink-common/pkg/services"
+ 	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
++	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
+ 	ringpb "github.com/smartcontractkit/chainlink-protos/ring/go"
+ 	"github.com/smartcontractkit/chainlink/v2/core/capabilities"
+ 	"github.com/smartcontractkit/chainlink/v2/core/capabilities/remote/sharding"
+@@ -25,6 +27,11 @@ import (
+ // cachedExpiry is how long a cached trigger event is kept for potential failover replay.
+ const cachedExpiry = 10 * time.Minute
+ 
++// ErrCoordinatedShardingUnsupported is returned by the coordinator-facing
++// methods of ShardFailoverManager. Sharding and the coordinated engine are
++// currently not compatible, so nothing should reach them.
++var ErrCoordinatedShardingUnsupported = errors.New("coordinated engine is not supported on a sharded node")
++
+ // ShardFailoverManager wraps a workflow Engine and handles shard ownership
+ // decisions externally, keeping the Engine oblivious to sharding. On the
+ // primary shard it allows all trigger events through. On a secondary shard
+@@ -409,4 +416,29 @@ func (m *ShardFailoverManager) ActiveExecutions() int32 { return m.engine.Active
+ // DrainStartedAt delegates to the wrapped engine.
+ func (m *ShardFailoverManager) DrainStartedAt() (time.Time, bool) { return m.engine.DrainStartedAt() }
+ 
+-var _ DrainableService = (*ShardFailoverManager)(nil)
++// ExecuteTrigger is unreachable on a sharded node: the coordinator is the only
++// caller of the EventSink path, and a sharded node never takes the coordinated
++// path. Failover replay calls the wrapped engine directly, not this method.
++func (m *ShardFailoverManager) ExecuteTrigger(context.Context, triggers.CoordinatedEvent) error {
++	return ErrCoordinatedShardingUnsupported
++}
++
++// Subscribe is unreachable on a sharded node: only the coordinator calls it,
++// while registering triggers for a coordinated engine.
++func (m *ShardFailoverManager) Subscribe(context.Context) ([]*sdkpb.TriggerSubscription, error) {
++	return nil, ErrCoordinatedShardingUnsupported
++}
++
++// Tenant delegates to the wrapped engine. It has no error to return, and as a
++// plain getter it cannot half-work, so it stays a passthrough.
++func (m *ShardFailoverManager) Tenant() contexts.CRE { return m.engine.Tenant() }
++
++// IsCoordinated delegates to the wrapped engine. Unlike the methods above this
++// is called on the legacy path — every reconciliation tick reads it to classify
++// the engine — so it must answer rather than fail.
++func (m *ShardFailoverManager) IsCoordinated() bool { return m.engine.IsCoordinated() }
++
++var (
++	_ DrainableService  = (*ShardFailoverManager)(nil)
++	_ v2.WorkflowEngine = (*ShardFailoverManager)(nil)
++)
+diff --git a/core/services/workflows/syncer/v2/shard_failover_manager_test.go b/core/services/workflows/syncer/v2/shard_failover_manager_test.go
+index fb73d29a82d..eee0d0f8bf0 100644
+--- a/core/services/workflows/syncer/v2/shard_failover_manager_test.go
++++ b/core/services/workflows/syncer/v2/shard_failover_manager_test.go
+@@ -19,6 +19,8 @@ import (
+ 	"github.com/smartcontractkit/chainlink/v2/core/capabilities/remote/sharding"
+ 	remotetypes "github.com/smartcontractkit/chainlink/v2/core/capabilities/remote/types"
+ 	p2ptypes "github.com/smartcontractkit/chainlink/v2/core/services/p2p/types"
++	v2 "github.com/smartcontractkit/chainlink/v2/core/services/workflows/v2"
++	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/v2/triggers"
+ )
+ 
+ // --- test doubles ---
+@@ -340,3 +342,49 @@ func (r *noopReceiver) Receive(context.Context, *remotetypes.MessageBody) {}
+ 
+ // Ensure fakeDonNotifier satisfies the interface.
+ var _ capabilities.DonSubscriber = (*fakeDonSubscriber)(nil)
++
++// newTestShardFailoverManager wraps engine in a manager that is never started,
++// so the sharding collaborators are left nil.
++func newTestShardFailoverManager(t *testing.T, engine v2.WorkflowEngine) *ShardFailoverManager {
++	t.Helper()
++	m := NewShardFailoverManager(ShardFailoverManagerConfig{
++		ShardingEnabled: true,
++		WorkflowID:      "wf-1",
++		WorkflowOwner:   "0xowner",
++		Logger:          logger.Test(t),
++	})
++	m.SetEngine(engine)
++	return m
++}
++
++// TestShardFailoverManager_DelegatesIsCoordinated covers the classification of
++// the wrapper a sharded node registers, which must follow the engine it wraps.
++func TestShardFailoverManager_DelegatesIsCoordinated(t *testing.T) {
++	t.Parallel()
++
++	t.Run("wrapping a legacy engine reports legacy", func(t *testing.T) {
++		t.Parallel()
++		m := newTestShardFailoverManager(t, &mockEngine{})
++		require.False(t, m.IsCoordinated())
++	})
++
++	// Unreachable while sharding and the coordinated engine are mutually
++	// exclusive, but asserted so the value stays delegated rather than assumed.
++	t.Run("wrapping a coordinated engine reports coordinated", func(t *testing.T) {
++		t.Parallel()
++		m := newTestShardFailoverManager(t, &fakeCoordinatedDrainableEngine{})
++		require.True(t, m.IsCoordinated())
++	})
++}
++
++// TestShardFailoverManager_CoordinatorMethodsUnsupported covers the
++// coordinator-facing methods, which must fail rather than delegate until
++// sharding and the coordinated engine can work together.
++func TestShardFailoverManager_CoordinatorMethodsUnsupported(t *testing.T) {
++	t.Parallel()
++	m := newTestShardFailoverManager(t, &mockEngine{})
++
++	_, err := m.Subscribe(t.Context())
++	require.ErrorIs(t, err, ErrCoordinatedShardingUnsupported)
++	require.ErrorIs(t, m.ExecuteTrigger(t.Context(), triggers.CoordinatedEvent{}), ErrCoordinatedShardingUnsupported)
++}
+diff --git a/core/services/workflows/syncer/v2/trigger_coordinator.go b/core/services/workflows/syncer/v2/trigger_coordinator.go
+new file mode 100644
+index 00000000000..a4025e9b1e5
+--- /dev/null
++++ b/core/services/workflows/syncer/v2/trigger_coordinator.go
+@@ -0,0 +1,103 @@
++package v2
++
++import (
++	"context"
++	"errors"
++
++	"github.com/jonboulle/clockwork"
++
++	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/registry"
++	"github.com/smartcontractkit/chainlink-common/pkg/logger"
++	"github.com/smartcontractkit/chainlink-common/pkg/services"
++	v2 "github.com/smartcontractkit/chainlink/v2/core/services/workflows/v2"
++)
++
++// ErrWorkflowNotCoordinated is returned by UnregisterTriggers for
++// a workflowID the coordinator never registered.
++var ErrWorkflowNotCoordinated = errors.New("workflow not registered with the trigger coordinator")
++
++// RegistrationParams is the per-workflow metadata RegisterTriggers needs to
++// build each capability's RequestMetadata.
++type RegistrationParams struct {
++	WorkflowOwner                 string
++	WorkflowName                  string
++	DecodedWorkflowName           string
++	WorkflowTag                   string
++	WorkflowDonID                 uint32
++	WorkflowDonConfigVersion      uint32
++	WorkflowRegistryChainSelector string
++	WorkflowRegistryAddress       string
++}
++
++// TriggerCoordinator owns trigger registration, the trigger handle map, event
++// delivery, and acknowledgement for every workflow running the coordinated engine.
++// It is a node-level singleton, started and stopped with the syncer.
++type TriggerCoordinator interface {
++	services.Service
++	v2.Acknowledger
++
++	// RegisterTriggers calls subscriber.Subscribe to obtain the engine's trigger
++	// subscriptions, registers them with the capability registry, retains the
++	// resulting handles and reader goroutines, and returns the registered
++	// trigger capability IDs. On any failure it unregisters what it already
++	// registered for this call and returns the error.
++	// Partial registration is never left behind.
++	RegisterTriggers(ctx context.Context, subscriber v2.Subscriber, params RegistrationParams) ([]string, error)
++
++	// UnregisterTriggers stops ingress for workflowID immediately (unregisters with the capability registry)
++	// and cleans up the handle map once the engine has been drained and closed, so an execution already in flight
++	// can still resolve its handle to ACK. It also ensures that any resources associated with the workflow are properly released.
++	// This includes managing the workflowLimits by calling workflowLimits.Free.
++	//
++	// Returns ErrWorkflowNotCoordinated if workflowID was never registered here
++	UnregisterTriggers(workflowID string) error
++}
++
++type noopTriggerCoordinator struct {
++	services.Service
++	eng  *services.Engine
++	lggr logger.Logger
++}
++
++// NewTriggerCoordinator returns the no-op coordinator: it logs the registration
++// and teardown calls the syncer makes, and does nothing else. No trigger is
++// registered with the capability registry and no event is ever delivered, so a
++// workflow routed to the coordinated engine while this implementation is in
++// place runs but never fires.
++//
++// capReg, engineRegistry and clock are unused here on purpose — the signature is
++// the one the real coordinator needs, so wiring it does not churn call sites.
++func NewTriggerCoordinator(capReg registry.CapabilitiesRegistry, engineRegistry *EngineRegistry, clock clockwork.Clock, lggr logger.Logger) TriggerCoordinator {
++	c := &noopTriggerCoordinator{
++		lggr: logger.Named(lggr, "TriggerCoordinator"),
++	}
++
++	c.Service, c.eng = services.Config{
++		Name: "TriggerCoordinator",
++		Start: func(context.Context) error {
++			c.lggr.Warnw("No-op trigger coordinator started: workflows on the coordinated engine will register no triggers and receive no events")
++			return nil
++		},
++		Close: func() error { return nil },
++	}.NewServiceEngine(c.lggr)
++
++	return c
++}
++
++func (c *noopTriggerCoordinator) RegisterTriggers(ctx context.Context, subscriber v2.Subscriber, params RegistrationParams) ([]string, error) {
++	c.lggr.Infow("No-op RegisterTriggers",
++		"workflowID", subscriber.Tenant().Workflow,
++		"workflowOwner", params.WorkflowOwner,
++		"workflowName", params.DecodedWorkflowName,
++		"workflowDonID", params.WorkflowDonID)
++	return []string{}, nil
++}
++
++func (c *noopTriggerCoordinator) Ack(ctx context.Context, triggerCapID, triggerRegistrationID, eventID string) error {
++	return nil
++}
++
++func (c *noopTriggerCoordinator) UnregisterTriggers(workflowID string) error {
++	c.lggr.Infow("No-op UnregisterTriggers", "workflowID", workflowID)
++	return nil
++}
+diff --git a/core/services/workflows/syncer/v2/workflow_registry.go b/core/services/workflows/syncer/v2/workflow_registry.go
+index 56143644606..d45ffc9a616 100644
+--- a/core/services/workflows/syncer/v2/workflow_registry.go
++++ b/core/services/workflows/syncer/v2/workflow_registry.go
+@@ -1075,22 +1075,42 @@ func (w *workflowRegistry) syncUsingReconciliationStrategy(ctx context.Context)
+ 
+ 			runningWorkflows := w.engineRegistry.GetAll()
+ 			w.metrics.recordRunningWorkflows(ctx, len(runningWorkflows))
+-			drainingWorkflows := 0
+-			for _, workflow := range runningWorkflows {
+-				drainable, isDrainable := workflow.Service.(DrainableService)
+-				if !isDrainable {
+-					continue
+-				}
+-				if _, draining := drainable.DrainStartedAt(); draining {
+-					drainingWorkflows++
+-				}
+-			}
+-			w.metrics.recordDrainingWorkflows(ctx, drainingWorkflows)
++			counts := countEngines(runningWorkflows)
++			w.metrics.recordDrainingWorkflows(ctx, counts.draining)
++			w.metrics.recordRunningEngines(ctx, counts.coordinated, counts.legacy)
+ 			w.metrics.incrementCompletedSyncs(ctx)
+ 		}
+ 	}
+ }
+ 
++// engineCounts is the per-tick breakdown of the engines in the registry.
++// coordinated + legacy always equals the number of engines; draining overlaps
++// with both.
++type engineCounts struct {
++	draining    int
++	coordinated int
++	legacy      int
++}
++
++func countEngines(engines []ServiceWithMetadata) engineCounts {
++	var c engineCounts
++	for _, e := range engines {
++		if e.Coordinated() {
++			c.coordinated++
++		} else {
++			c.legacy++
++		}
++		drainable, isDrainable := e.Service.(DrainableService)
++		if !isDrainable {
++			continue
++		}
++		if _, draining := drainable.DrainStartedAt(); draining {
++			c.draining++
++		}
++	}
++	return c
++}
++
+ // reconcileOrphanedSpecs releases persisted specs whose workflow ID is absent
+ // from all sources' metadata, catching workflows deleted while the node was
+ // down — no engine exists at the next tick, so engine reconciliation can't
+diff --git a/core/services/workflows/syncer/v2/workflow_syncer_v2_test.go b/core/services/workflows/syncer/v2/workflow_syncer_v2_test.go
+index f6ad2d7d06c..e8b0d41be16 100644
+--- a/core/services/workflows/syncer/v2/workflow_syncer_v2_test.go
++++ b/core/services/workflows/syncer/v2/workflow_syncer_v2_test.go
+@@ -413,7 +413,7 @@ func Test_RegistrySyncer_WorkflowRegistered_InitiallyActivatedV2(t *testing.T) {
+ 	require.NoError(t, err)
+ 
+ 	handler, err := NewEventHandler(lggr, wfStore, nil, true, capRegistry, &confidentialrelay.ExecutionHandlers{}, er,
+-		emitter, limiters, featureFlags, rl, wl, store, workflowEncryptionKey, donNotifier, WithStaticEngine(&mockService{}), withTestOrgResolver())
++		emitter, limiters, featureFlags, rl, wl, store, workflowEncryptionKey, donNotifier, WithStaticEngine(&mockEngine{}), withTestOrgResolver())
+ 	require.NoError(t, err)
+ 
+ 	worker, err := NewWorkflowRegistry(
+diff --git a/core/services/workflows/v2/config.go b/core/services/workflows/v2/config.go
+index bf993076a24..8470792fbee 100644
+--- a/core/services/workflows/v2/config.go
++++ b/core/services/workflows/v2/config.go
+@@ -12,7 +12,6 @@ import (
+ 	commoncap "github.com/smartcontractkit/chainlink-common/pkg/capabilities"
+ 	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/registry"
+ 	"github.com/smartcontractkit/chainlink-common/pkg/config"
+-	"github.com/smartcontractkit/chainlink-common/pkg/contexts"
+ 	"github.com/smartcontractkit/chainlink-common/pkg/custmsg"
+ 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+ 	"github.com/smartcontractkit/chainlink-common/pkg/services"
+@@ -387,6 +386,10 @@ type EngineFeatureFlags struct {
+ 	// which lets ops schedule a healing window across the DON via cresettings.
+ 	// Nil when construction fails; call sites must nil-check.
+ 	WorkflowTagBackfill limits.RangeLimiter[config.Timestamp]
++
++	// CoordinatedEngine selects the coordinatedEngine over the legacy trigger-owning
++	// Engine for newly created workflows. Nil when construction fails; call sites must nil-check.
++	CoordinatedEngine limits.GateLimiter
+ }
+ 
+ func NewFeatureFlags(lf limits.Factory, cfgFn func(*cresettings.Workflows)) (*EngineFeatureFlags, error) {
+@@ -398,8 +401,14 @@ func NewFeatureFlags(lf limits.Factory, cfgFn func(*cresettings.Workflows)) (*En
+ 	if err != nil {
+ 		return nil, fmt.Errorf("workflow tag backfill flag: %w", err)
+ 	}
++
++	coordinatedEngine, err := limits.MakeGateLimiter(lf, cresettings.Default.CoordinatedEngineEnabled)
++	if err != nil {
++		return nil, fmt.Errorf("coordinated engine flag: %w", err)
++	}
+ 	return &EngineFeatureFlags{
+ 		WorkflowTagBackfill: workflowTagBackfill,
++		CoordinatedEngine:   coordinatedEngine,
+ 	}, nil
+ }
+ 
+@@ -427,12 +436,6 @@ type LifecycleHooks struct {
+ 	// has completed initialization. It is also helpful for testing.
+ 	OnInitialized func(err error)
+ 
+-	// OnSubscriptionsReady is called after the WASM Subscribe call returns
+-	// and the subscriptions have been validated, but before trigger
+-	// registration begins. It allows the caller (syncer/dispatcher) to
+-	// inspect or modify the subscriptions before they are registered with
+-	// the capabilities registry. Returning an error aborts initialization.
+-	OnSubscriptionsReady    func(subs []*sdkpb.TriggerSubscription, cre contexts.CRE) error
+ 	OnSubscribedToTriggers  func(triggerIDs []string)
+ 	OnTriggerEventDropped   func(triggerID, eventID, reason string)
+ 	OnExecutionFinished     func(executionID string, status string)
+@@ -522,9 +525,6 @@ func (h *LifecycleHooks) setDefaultHooks() {
+ 	if h.OnInitialized == nil {
+ 		h.OnInitialized = func(err error) {}
+ 	}
+-	if h.OnSubscriptionsReady == nil {
+-		h.OnSubscriptionsReady = func(subs []*sdkpb.TriggerSubscription, cre contexts.CRE) error { return nil }
+-	}
+ 	if h.OnSubscribedToTriggers == nil {
+ 		h.OnSubscribedToTriggers = func(triggerIDs []string) {}
+ 	}
+diff --git a/core/services/workflows/v2/engine_test.go b/core/services/workflows/v2/engine_test.go
+index d15b3eb0991..3c0c417cfb2 100644
+--- a/core/services/workflows/v2/engine_test.go
++++ b/core/services/workflows/v2/engine_test.go
+@@ -2900,10 +2900,6 @@ func newTestEngine(
+ 		OnInitialized: func(err error) {
+ 			e.initializedCh <- err
+ 		},
+-		OnSubscriptionsReady: func(_ []*sdkpb.TriggerSubscription, _ contexts.CRE) error {
+-			e.subscriptionsReadyCalls.Add(1)
+-			return nil
+-		},
+ 		OnSubscribedToTriggers: func(triggerIDs []string) {
+ 			e.subscribedToTriggersCh <- triggerIDs
+ 		},
+diff --git a/deployment/go.mod b/deployment/go.mod
+index a5c18580870..311a7fdd9be 100644
+--- a/deployment/go.mod
++++ b/deployment/go.mod
+@@ -46,7 +46,7 @@ require (
+ 	github.com/smartcontractkit/chainlink-ccip/chains/solana/deployment v0.0.0-20260916222901-720a003dab50
+ 	github.com/smartcontractkit/chainlink-ccip/chains/solana/gobindings v0.0.0-20260916222901-720a003dab50
+ 	github.com/smartcontractkit/chainlink-ccip/deployment v0.0.0-20260916222901-720a003dab50
+-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f
++	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49
+ 	github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d
+ 	github.com/smartcontractkit/chainlink-data-streams v1.1.1
+ 	github.com/smartcontractkit/chainlink-deployments-framework v0.122.2
+diff --git a/deployment/go.sum b/deployment/go.sum
+index 524ce8bf8e5..364d3118807 100644
+--- a/deployment/go.sum
++++ b/deployment/go.sum
+@@ -1403,8 +1403,8 @@ github.com/smartcontractkit/chainlink-ccip/deployment v0.0.0-20260916222901-720a
+ github.com/smartcontractkit/chainlink-ccip/deployment v0.0.0-20260916222901-720a003dab50/go.mod h1:Dm/Abz0vr7F2v9TygUX947q8HIwJEJikDfSdanX1Cic=
+ github.com/smartcontractkit/chainlink-ccv v0.13.1-0.20260918171034-c93b0d2ef3c0 h1:3f+Ijgr0vghawMUAitgFILQpt4KsoYHGv1Zb/YBeeQM=
+ github.com/smartcontractkit/chainlink-ccv v0.13.1-0.20260918171034-c93b0d2ef3c0/go.mod h1:gX7FJzSnGQx4RAlsn2rRW8IQBlEFZYiXFXEEB5jnQgA=
+-github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f h1:gasuIea3r0AIuEkXDQvIw+TclWt184xBRZGwed+fP6I=
+-github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f/go.mod h1:2AvwgNr3I6s0Ny1qmovy/stHQIihEv/9g74aNYzQYYo=
++github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49 h1:8vq1hWW7NR22x6+hpT727FREMQL4LqZuTpgKBTHVUKo=
++github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49/go.mod h1:2AvwgNr3I6s0Ny1qmovy/stHQIihEv/9g74aNYzQYYo=
+ github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d h1:M9xuiIvdiHtim4nlxCVajyC/Mk63tAg9ESWb/biAhNA=
+ github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d/go.mod h1:rI2njmTlyTvh+xhmORmK6qX3+V1ycDAqGJLu8LS8WpU=
+ github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20260915184316-2730f1867c92 h1:Z1OIGukDhJD+Gknr5G07Vtml24E7BwKaIQoWzV/SdqA=
+diff --git a/go.mod b/go.mod
+index 73c4825a890..5cbcbf0edbb 100644
+--- a/go.mod
++++ b/go.mod
+@@ -82,7 +82,7 @@ require (
+ 	github.com/smartcontractkit/chainlink-ccip/chains/solana v0.0.0-20260908155618-50f521d70e62
+ 	github.com/smartcontractkit/chainlink-ccip/chains/solana/gobindings v0.0.0-20260908155618-50f521d70e62
+ 	github.com/smartcontractkit/chainlink-ccv v0.13.1-0.20260918171034-c93b0d2ef3c0
+-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f
++	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49
+ 	github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d
+ 	github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20260915184316-2730f1867c92
+ 	github.com/smartcontractkit/chainlink-data-streams v1.1.1
+diff --git a/go.sum b/go.sum
+index e067dafc04d..458423632cd 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1104,8 +1104,8 @@ github.com/smartcontractkit/chainlink-ccip/chains/solana/gobindings v0.0.0-20260
+ github.com/smartcontractkit/chainlink-ccip/chains/solana/gobindings v0.0.0-20260908155618-50f521d70e62/go.mod h1:c++Ed0jeYn4w8WIfiAboRwN6ClRRVGglL0qwB/QjJvM=
+ github.com/smartcontractkit/chainlink-ccv v0.13.1-0.20260918171034-c93b0d2ef3c0 h1:3f+Ijgr0vghawMUAitgFILQpt4KsoYHGv1Zb/YBeeQM=
+ github.com/smartcontractkit/chainlink-ccv v0.13.1-0.20260918171034-c93b0d2ef3c0/go.mod h1:gX7FJzSnGQx4RAlsn2rRW8IQBlEFZYiXFXEEB5jnQgA=
+-github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f h1:gasuIea3r0AIuEkXDQvIw+TclWt184xBRZGwed+fP6I=
+-github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f/go.mod h1:2AvwgNr3I6s0Ny1qmovy/stHQIihEv/9g74aNYzQYYo=
++github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49 h1:8vq1hWW7NR22x6+hpT727FREMQL4LqZuTpgKBTHVUKo=
++github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49/go.mod h1:2AvwgNr3I6s0Ny1qmovy/stHQIihEv/9g74aNYzQYYo=
+ github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d h1:M9xuiIvdiHtim4nlxCVajyC/Mk63tAg9ESWb/biAhNA=
+ github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d/go.mod h1:rI2njmTlyTvh+xhmORmK6qX3+V1ycDAqGJLu8LS8WpU=
+ github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20260915184316-2730f1867c92 h1:Z1OIGukDhJD+Gknr5G07Vtml24E7BwKaIQoWzV/SdqA=
+diff --git a/integration-tests/go.mod b/integration-tests/go.mod
+index f07c1d098d7..25e7027b495 100644
+--- a/integration-tests/go.mod
++++ b/integration-tests/go.mod
+@@ -34,7 +34,7 @@ require (
+ 	github.com/smartcontractkit/chainlink-ccip/chains/evm v0.0.0-20260916222901-720a003dab50
+ 	github.com/smartcontractkit/chainlink-ccip/chains/solana v0.0.0-20260916222901-720a003dab50
+ 	github.com/smartcontractkit/chainlink-ccip/chains/solana/gobindings v0.0.0-20260916222901-720a003dab50
+-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f
++	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49
+ 	github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d
+ 	github.com/smartcontractkit/chainlink-deployments-framework v0.122.2
+ 	github.com/smartcontractkit/chainlink-evm v0.3.4-0.20260917132551-2a2b38e8b744
+diff --git a/integration-tests/go.sum b/integration-tests/go.sum
+index 8b7eceeeb22..38ac1e323fb 100644
+--- a/integration-tests/go.sum
++++ b/integration-tests/go.sum
+@@ -1392,8 +1392,8 @@ github.com/smartcontractkit/chainlink-ccip/deployment v0.0.0-20260916222901-720a
+ github.com/smartcontractkit/chainlink-ccip/deployment v0.0.0-20260916222901-720a003dab50/go.mod h1:Dm/Abz0vr7F2v9TygUX947q8HIwJEJikDfSdanX1Cic=
+ github.com/smartcontractkit/chainlink-ccv v0.13.1-0.20260918171034-c93b0d2ef3c0 h1:3f+Ijgr0vghawMUAitgFILQpt4KsoYHGv1Zb/YBeeQM=
+ github.com/smartcontractkit/chainlink-ccv v0.13.1-0.20260918171034-c93b0d2ef3c0/go.mod h1:gX7FJzSnGQx4RAlsn2rRW8IQBlEFZYiXFXEEB5jnQgA=
+-github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f h1:gasuIea3r0AIuEkXDQvIw+TclWt184xBRZGwed+fP6I=
+-github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f/go.mod h1:2AvwgNr3I6s0Ny1qmovy/stHQIihEv/9g74aNYzQYYo=
++github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49 h1:8vq1hWW7NR22x6+hpT727FREMQL4LqZuTpgKBTHVUKo=
++github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49/go.mod h1:2AvwgNr3I6s0Ny1qmovy/stHQIihEv/9g74aNYzQYYo=
+ github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d h1:M9xuiIvdiHtim4nlxCVajyC/Mk63tAg9ESWb/biAhNA=
+ github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d/go.mod h1:rI2njmTlyTvh+xhmORmK6qX3+V1ycDAqGJLu8LS8WpU=
+ github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20260915184316-2730f1867c92 h1:Z1OIGukDhJD+Gknr5G07Vtml24E7BwKaIQoWzV/SdqA=
+diff --git a/integration-tests/load/go.mod b/integration-tests/load/go.mod
+index 6f29b5d19f7..a06af559522 100644
+--- a/integration-tests/load/go.mod
++++ b/integration-tests/load/go.mod
+@@ -24,7 +24,7 @@ require (
+ 	github.com/smartcontractkit/chainlink-ccip/chains/evm v0.0.0-20260916222901-720a003dab50
+ 	github.com/smartcontractkit/chainlink-ccip/chains/solana v0.0.0-20260916222901-720a003dab50
+ 	github.com/smartcontractkit/chainlink-ccip/chains/solana/gobindings v0.0.0-20260916222901-720a003dab50
+-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f
++	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49
+ 	github.com/smartcontractkit/chainlink-deployments-framework v0.122.2
+ 	github.com/smartcontractkit/chainlink-evm v0.3.4-0.20260917132551-2a2b38e8b744
+ 	github.com/smartcontractkit/chainlink-testing-framework/framework v0.16.8
+diff --git a/integration-tests/load/go.sum b/integration-tests/load/go.sum
+index 0848f18e14f..dbc4750885b 100644
+--- a/integration-tests/load/go.sum
++++ b/integration-tests/load/go.sum
+@@ -1630,8 +1630,8 @@ github.com/smartcontractkit/chainlink-ccip/deployment v0.0.0-20260916222901-720a
+ github.com/smartcontractkit/chainlink-ccip/deployment v0.0.0-20260916222901-720a003dab50/go.mod h1:Dm/Abz0vr7F2v9TygUX947q8HIwJEJikDfSdanX1Cic=
+ github.com/smartcontractkit/chainlink-ccv v0.13.1-0.20260918171034-c93b0d2ef3c0 h1:3f+Ijgr0vghawMUAitgFILQpt4KsoYHGv1Zb/YBeeQM=
+ github.com/smartcontractkit/chainlink-ccv v0.13.1-0.20260918171034-c93b0d2ef3c0/go.mod h1:gX7FJzSnGQx4RAlsn2rRW8IQBlEFZYiXFXEEB5jnQgA=
+-github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f h1:gasuIea3r0AIuEkXDQvIw+TclWt184xBRZGwed+fP6I=
+-github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f/go.mod h1:2AvwgNr3I6s0Ny1qmovy/stHQIihEv/9g74aNYzQYYo=
++github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49 h1:8vq1hWW7NR22x6+hpT727FREMQL4LqZuTpgKBTHVUKo=
++github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49/go.mod h1:2AvwgNr3I6s0Ny1qmovy/stHQIihEv/9g74aNYzQYYo=
+ github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d h1:M9xuiIvdiHtim4nlxCVajyC/Mk63tAg9ESWb/biAhNA=
+ github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d/go.mod h1:rI2njmTlyTvh+xhmORmK6qX3+V1ycDAqGJLu8LS8WpU=
+ github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20260915184316-2730f1867c92 h1:Z1OIGukDhJD+Gknr5G07Vtml24E7BwKaIQoWzV/SdqA=
+diff --git a/system-tests/lib/go.mod b/system-tests/lib/go.mod
+index 86b87f7c8eb..4b73b9512d5 100644
+--- a/system-tests/lib/go.mod
++++ b/system-tests/lib/go.mod
+@@ -37,7 +37,7 @@ require (
+ 	github.com/smartcontractkit/chain-selectors v1.0.111
+ 	github.com/smartcontractkit/chainlink-aptos v0.0.0-20260923062809-ca886ade4d26
+ 	github.com/smartcontractkit/chainlink-ccip/chains/solana v0.0.0-20260916222901-720a003dab50
+-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f
++	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49
+ 	github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d
+ 	github.com/smartcontractkit/chainlink-confidential-compute v1.3.0
+ 	github.com/smartcontractkit/chainlink-deployments-framework v0.122.2
+diff --git a/system-tests/lib/go.sum b/system-tests/lib/go.sum
+index 381c70b04cc..3f808f08949 100644
+--- a/system-tests/lib/go.sum
++++ b/system-tests/lib/go.sum
+@@ -1654,8 +1654,8 @@ github.com/smartcontractkit/chainlink-ccip/deployment v0.0.0-20260916222901-720a
+ github.com/smartcontractkit/chainlink-ccip/deployment v0.0.0-20260916222901-720a003dab50/go.mod h1:Dm/Abz0vr7F2v9TygUX947q8HIwJEJikDfSdanX1Cic=
+ github.com/smartcontractkit/chainlink-ccv v0.13.1-0.20260918171034-c93b0d2ef3c0 h1:3f+Ijgr0vghawMUAitgFILQpt4KsoYHGv1Zb/YBeeQM=
+ github.com/smartcontractkit/chainlink-ccv v0.13.1-0.20260918171034-c93b0d2ef3c0/go.mod h1:gX7FJzSnGQx4RAlsn2rRW8IQBlEFZYiXFXEEB5jnQgA=
+-github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f h1:gasuIea3r0AIuEkXDQvIw+TclWt184xBRZGwed+fP6I=
+-github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f/go.mod h1:2AvwgNr3I6s0Ny1qmovy/stHQIihEv/9g74aNYzQYYo=
++github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49 h1:8vq1hWW7NR22x6+hpT727FREMQL4LqZuTpgKBTHVUKo=
++github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49/go.mod h1:2AvwgNr3I6s0Ny1qmovy/stHQIihEv/9g74aNYzQYYo=
+ github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d h1:M9xuiIvdiHtim4nlxCVajyC/Mk63tAg9ESWb/biAhNA=
+ github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d/go.mod h1:rI2njmTlyTvh+xhmORmK6qX3+V1ycDAqGJLu8LS8WpU=
+ github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20260915184316-2730f1867c92 h1:Z1OIGukDhJD+Gknr5G07Vtml24E7BwKaIQoWzV/SdqA=
+diff --git a/system-tests/tests/go.mod b/system-tests/tests/go.mod
+index ff3f84d756a..a4fca9174b7 100644
+--- a/system-tests/tests/go.mod
++++ b/system-tests/tests/go.mod
+@@ -76,7 +76,7 @@ require (
+ 	github.com/smartcontractkit/chain-selectors v1.0.111
+ 	github.com/smartcontractkit/chainlink-aptos v0.0.0-20260923062809-ca886ade4d26
+ 	github.com/smartcontractkit/chainlink-ccip/chains/solana v0.0.0-20260916222901-720a003dab50
+-	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f
++	github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49
+ 	github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d
+ 	github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20260915184316-2730f1867c92
+ 	github.com/smartcontractkit/chainlink-confidential-compute v1.3.0
+diff --git a/system-tests/tests/go.sum b/system-tests/tests/go.sum
+index e44e29a7837..8ad9f79d3c9 100644
+--- a/system-tests/tests/go.sum
++++ b/system-tests/tests/go.sum
+@@ -1833,8 +1833,8 @@ github.com/smartcontractkit/chainlink-ccip/deployment v0.0.0-20260916222901-720a
+ github.com/smartcontractkit/chainlink-ccip/deployment v0.0.0-20260916222901-720a003dab50/go.mod h1:Dm/Abz0vr7F2v9TygUX947q8HIwJEJikDfSdanX1Cic=
+ github.com/smartcontractkit/chainlink-ccv v0.13.1-0.20260918171034-c93b0d2ef3c0 h1:3f+Ijgr0vghawMUAitgFILQpt4KsoYHGv1Zb/YBeeQM=
+ github.com/smartcontractkit/chainlink-ccv v0.13.1-0.20260918171034-c93b0d2ef3c0/go.mod h1:gX7FJzSnGQx4RAlsn2rRW8IQBlEFZYiXFXEEB5jnQgA=
+-github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f h1:gasuIea3r0AIuEkXDQvIw+TclWt184xBRZGwed+fP6I=
+-github.com/smartcontractkit/chainlink-common v0.11.2-0.20260928161532-9b1062f5076f/go.mod h1:2AvwgNr3I6s0Ny1qmovy/stHQIihEv/9g74aNYzQYYo=
++github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49 h1:8vq1hWW7NR22x6+hpT727FREMQL4LqZuTpgKBTHVUKo=
++github.com/smartcontractkit/chainlink-common v0.11.2-0.20260929093916-bc9452cf0a49/go.mod h1:2AvwgNr3I6s0Ny1qmovy/stHQIihEv/9g74aNYzQYYo=
+ github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d h1:M9xuiIvdiHtim4nlxCVajyC/Mk63tAg9ESWb/biAhNA=
+ github.com/smartcontractkit/chainlink-common/keystore v1.3.1-0.20260903141829-ef07b52a737d/go.mod h1:rI2njmTlyTvh+xhmORmK6qX3+V1ycDAqGJLu8LS8WpU=
+ github.com/smartcontractkit/chainlink-common/pkg/chipingress v0.0.11-0.20260915184316-2730f1867c92 h1:Z1OIGukDhJD+Gknr5G07Vtml24E7BwKaIQoWzV/SdqA=

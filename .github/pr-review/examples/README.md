@@ -1,0 +1,91 @@
+# Examples: inline feedback on PRs reviewed by jmank88
+
+These examples come from the original eval run that produced
+`chainlink-coding-standards-ai-automation-poc.xlsx`. The source is
+`intern4all/pr-eval`; its `Dockerfile` copies
+`.github/copilot-instructions.md` to `/prs/standards.md`, and `entrypoint.sh`
+asks GLM 5.3 Flash to judge the PR against that file.
+
+The three PRs below were reviewed by `jmank88` and are in the eval set. Each
+directory contains:
+
+| File | What it is |
+| --- | --- |
+| `jmank.md` | jmank88's actual inline comments, with file:line anchors. This is the style reference. |
+| `eval.md` | The original eval response, as produced by `intern4all/pr-eval`. |
+| `findings.json` | The eval findings normalized into the workflow schema. |
+| `review.json` | The GitHub review payload: one `COMMENT` review with inline comments. |
+| `review.md` | A rendered preview of the review. |
+| `meta.json` | PR URL, title, base SHA, head SHA. |
+| `diff.patch` | The exact diff used to validate every anchor. |
+
+## The three PRs
+
+| PR | Title | jmank88 comments | Eval findings | Inline examples |
+| --- | --- | ---: | ---: | ---: |
+| [#23837](https://github.com/smartcontractkit/chainlink/pull/23837) | `[CRE-6745] wire noop coordinator + feature flag` | 3 | 5 | 5 |
+| [#23832](https://github.com/smartcontractkit/chainlink/pull/23832) | `[CRE] Prune stale remote capability shims in the launcher` | 3 | 3 | 3 |
+| [#23878](https://github.com/smartcontractkit/chainlink/pull/23878) | `[CRE-6746] trigger coordinator implementation` | 5 | 1 | 1 |
+
+All nine eval findings anchor to added lines in the diff, so the workflow can
+post every one as a true inline comment.
+
+## What the comparison shows
+
+These are complementary reviews, not a like-for-like match:
+
+- **#23837:** jmank88 asked for package defaults, questioned a bool where a
+  timestamp range would preserve the start time, and suggested extracting a
+  duplicated cleanup block. The eval instead found a leaked gate limiter, a
+  hardcoded DON config version, a noop that violates its interface contract,
+  and missing tests for the noop. The duplication theme overlaps; the
+  correctness findings are deeper.
+- **#23832:** jmank88 asked about double-close semantics, `shimID` naming, and
+  a `slices.Delete` simplification. The eval found that pruning a stale shim
+  can remove the wrong registry entry, that a removed method can still
+  silently return a dead callback, and that the executable prune paths were
+  untested. Almost no overlap.
+- **#23878:** jmank88 focused on concurrency and lifecycle shape (RWMutex,
+  deferred cleanup, helper extraction, `sync.Map.Range` semantics). The eval
+  found that a failed capability unregistration is never retried and its
+  retry state is dropped.
+
+The lesson is the same one the reviewer interviews reached: the bot is useful
+for the behavioural defect a human reviewer may not have time to chase, and
+the human is better at naming, shape, and future-fragility comments. The
+workflow should stay silent on the latter when it is only style.
+
+## Regenerate
+
+```bash
+python3 .github/pr-review/pr_evals.py replay \
+  --eval-dir ~/Projects/intern4all/pr-eval/out \
+  --prs-json ~/Projects/intern4all/pr-eval/build/prs.json \
+  --diff-dir ~/Projects/intern4all/pr-eval/build/prs \
+  --out-dir .github/pr-review/examples \
+  --prs 23837,23832,23878 \
+  --with-jmank
+```
+
+## Validate
+
+```bash
+python3 .github/pr-review/pr_evals.py validate \
+  --examples-dir .github/pr-review/examples
+```
+
+The validator checks that every `review.json` comment names a file in the diff
+and that its `line` and `side` are a real GitHub anchor. The self-test
+workflow runs the same check, and can fetch the diffs from GitHub with
+`--online` when a cached `diff.patch` is not present.
+
+## Live demo
+
+The live workflow is exercised on `007vasy/chainlink` so it can post real
+inline comments without touching merged upstream PRs. Replace this section
+with the run links after the demo:
+
+- PR #2 (smoke test): `007vasy/chainlink#2`
+- #23837 demo: `007vasy/chainlink#<n>`
+- #23832 demo: `007vasy/chainlink#<n>`
+- #23878 demo: `007vasy/chainlink#<n>`

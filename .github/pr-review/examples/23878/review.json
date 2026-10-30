@@ -1,0 +1,13 @@
+{
+  "commit_id": "f881b528cdc2803a914db5cad570724fc75afdd1",
+  "event": "COMMENT",
+  "body": "<!-- pr-coding-standards-review -->\n\n**Coding-standards review**\n\nReviewed `smartcontractkit/chainlink#23878` against `.github/copilot-instructions.md` at `eaa743b150ca`.\n\n1 inline finding(s).",
+  "comments": [
+    {
+      "path": "core/services/workflows/v2/triggers/coordinator.go",
+      "line": 344,
+      "side": "RIGHT",
+      "body": "**High**\n\na failed capability-side unregistration is never retried and the state needed to retry it is dropped: when `Unregister` fails (`failCount > 0`, line 264-265) the entry stays with `unregistered=false`, but callers only log the error (handler.go:1052-1054, handler.go:1187-1189) and `releaseWhenDrained` unconditionally `deleteIf`s the entry and frees the slot as soon as the cancelled readers drain, after which every future `UnregisterTriggers` returns `ErrWorkflowNotCoordinated` (line 244-247) and even `close()`'s `pending()` snapshot can no longer see the workflow \u2014 so the contract at coordinator.go:67 (\"A failed capability unregistration is returned and retried on the next call\") cannot be honored; failure scenario: pausing/deleting a workflow while a trigger capability is briefly unreachable (gRPC error) leaves the trigger registered on the capability for the life of the node, and the capability keeps firing events into a channel no reader will ever consume (the coordinator never closes the event channel); the same gap hits `RegisterTriggers`'s pre-unregister (line 176-178), which proceeds to re-register under the same registration IDs despite its own comment that the leftover \"must be unregistered first: unregistering it later would remove this one\" - error is\n\n**Standard:** \"handled once, at the layer that can act on it\"\n\n**Fix:** have the release waiter (and/or `close()`) retry the capability-side `Unregister` with backoff for entries whose `unregistered` flag is still false \u2014 keep such entries out of `deleteIf` until the unregister succeeds \u2014 and make `RegisterTriggers` abort (or block) when its pre-unregister fails instead of registering over the leftover\n\n<!-- pr-coding-standards-review -->"
+    }
+  ]
+}

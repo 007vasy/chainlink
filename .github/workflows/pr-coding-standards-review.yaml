@@ -1,0 +1,174 @@
+name: PR Coding Standards Review
+
+# Reviews a PR against .github/copilot-instructions.md and posts inline review
+# comments. The reviewer is opencode + Fireworks GLM 5.3 Flash, the same stack
+# that produced the PR eval sheet.
+#
+# Requires the FIREWORKS_API_KEY repository secret.
+#
+# Fork PRs are skipped: GitHub does not expose repository secrets to them, and
+# checking out untrusted code with a model key is not a trade this workflow
+# makes. Use a branch in this repository, or run workflow_dispatch on the fork.
+
+on:
+  pull_request:
+    types: [ready_for_review, reopened, labeled, synchronize]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number
+        required: true
+        type: string
+      dry_run:
+        description: Do not post the review
+        required: false
+        default: true
+        type: boolean
+      min_severity:
+        description: Minimum severity to comment on
+        required: false
+        default: medium
+        type: choice
+        options: [low, medium, high]
+      allow_closed:
+        description: Allow posting to a closed or merged PR
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-coding-standards-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+        !github.event.pull_request.draft &&
+        (github.event.action != 'synchronize' || contains(github.event.pull_request.labels.*.name, 'ai-review')) &&
+        (github.event.action != 'labeled' || github.event.label.name == 'ai-review')) ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        (startsWith(github.event.comment.body, '/review') || startsWith(github.event.comment.body, '/ai-review')))
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR_INPUT: ${{ inputs.pr_number }}
+          PR_EVENT: ${{ github.event.pull_request.number || github.event.issue.number }}
+          COMMENTER: ${{ github.event.comment.user.login }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            PR="$PR_INPUT"
+          else
+            PR="$PR_EVENT"
+          fi
+          if ! [[ "$PR" =~ ^[0-9]+$ ]]; then
+            echo "could not resolve a PR number" >&2
+            exit 1
+          fi
+
+          if [ "$EVENT" = "issue_comment" ]; then
+            PERMISSION=$(gh api "repos/${REPO}/collaborators/${COMMENTER}/permission" --jq '.permission' 2>/dev/null || echo none)
+            if [ "$PERMISSION" != "write" ] && [ "$PERMISSION" != "admin" ]; then
+              echo "only reviewers with write access can request a review" >&2
+              exit 1
+            fi
+          fi
+
+          DATA=$(gh api "repos/${REPO}/pulls/${PR}")
+          printf '%s\n' "$DATA" > "$RUNNER_TEMP/pr.json"
+          HEAD_REPO=$(jq -r '.head.repo.full_name' <<<"$DATA")
+          {
+            echo "number=${PR}"
+            echo "base_sha=$(jq -r '.base.sha' <<<"$DATA")"
+            echo "head_sha=$(jq -r '.head.sha' <<<"$DATA")"
+            echo "head_repo=${HEAD_REPO}"
+            echo "state=$(jq -r '.state' <<<"$DATA")"
+            echo "title=$(jq -r '.title' <<<"$DATA")"
+            echo "url=$(jq -r '.html_url' <<<"$DATA")"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$HEAD_REPO" != "$REPO" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Skipping fork PR ${REPO}#${PR}: repository secrets are not available."
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        if: steps.pr.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node
+        if: steps.pr.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install opencode
+        if: steps.pr.outputs.skip != 'true'
+        run: npm install --global opencode-ai@2.2.2
+
+      - name: Review pull request
+        if: steps.pr.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FIREWORKS_API_KEY:-}" ]; then
+            echo "FIREWORKS_API_KEY is not set for ${REPO}" >&2
+            exit 1
+          fi
+          mkdir -p /tmp/pr-review
+          ARGS=(
+            --repo "$REPO"
+            --pr "${{ steps.pr.outputs.number }}"
+            --workdir "$GITHUB_WORKSPACE"
+            --out-dir /tmp/pr-review
+            --base-sha "${{ steps.pr.outputs.base_sha }}"
+            --head-sha "${{ steps.pr.outputs.head_sha }}"
+            --min-severity "${{ inputs.min_severity || 'medium' }}"
+            --checkout
+          )
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS+=(--dry-run)
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.allow_closed }}" = "true" ]; then
+            ARGS+=(--allow-closed)
+          fi
+          python3 .github/pr-review/review.py run "${ARGS[@]}"
+
+      - name: Upload review artifact
+        if: always() && steps.pr.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-review-${{ steps.pr.outputs.number || github.run_id }}
+          path: /tmp/pr-review
+          if-no-files-found: ignore
+          retention-days: 7

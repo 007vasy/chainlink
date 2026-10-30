@@ -1,0 +1,23 @@
+[
+  {
+    "pr": 23837,
+    "title": "[CRE-6745] wire noop coordinator + feature flag",
+    "findings": 5,
+    "inline": 5,
+    "general": 0
+  },
+  {
+    "pr": 23832,
+    "title": "[CRE] Prune stale remote capability shims in the launcher",
+    "findings": 3,
+    "inline": 3,
+    "general": 0
+  },
+  {
+    "pr": 23878,
+    "title": "[CRE-6746] trigger coordinator implementation",
+    "findings": 1,
+    "inline": 1,
+    "general": 0
+  }
+]

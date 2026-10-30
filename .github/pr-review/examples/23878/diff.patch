@@ -1,0 +1,1689 @@
+diff --git a/core/services/cre/cre.go b/core/services/cre/cre.go
+index db9ad922b3f..651ebb5665d 100644
+--- a/core/services/cre/cre.go
++++ b/core/services/cre/cre.go
+@@ -27,6 +27,7 @@ import (
+ 	"github.com/smartcontractkit/chainlink-common/pkg/custmsg"
+ 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+ 	"github.com/smartcontractkit/chainlink-common/pkg/loop"
++	commonmetrics "github.com/smartcontractkit/chainlink-common/pkg/metrics"
+ 	nodeauthjwt "github.com/smartcontractkit/chainlink-common/pkg/nodeauth/jwt"
+ 	"github.com/smartcontractkit/chainlink-common/pkg/resourcemanager"
+ 	commonsrv "github.com/smartcontractkit/chainlink-common/pkg/services"
+@@ -964,6 +965,24 @@ func newWorkflowRegistrySyncerV2(
+ 	meterRecordsEnabled := meteringCfg != nil && meteringCfg.MeterRecordsEnabled()
+ 	meterSnapshotsEnabled := meteringCfg != nil && meteringCfg.MeterSnapshotsEnabled()
+ 
++	coordinatorMetrics, err := wfmonitoring.InitMonitoringResources()
++	if err != nil {
++		return nil, nil, fmt.Errorf("unable to init trigger coordinator metrics: %w", err)
++	}
++	triggerCoordinator := triggers.NewCoordinator(
++		triggers.RegisterDeps{
++			CapRegistry:  opts.CapabilitiesRegistry,
++			RegTimeout:   engineLimiters.TriggerRegistrationsTime,
++			ChainAllowed: engineLimiters.ChainAllowed,
++			Settings:     engineLimiters.Settings,
++			Logger:       lggr,
++			Metrics:      wfmonitoring.NewWorkflowsMetricLabeler(commonmetrics.NewLabeler(), coordinatorMetrics),
++		},
++		syncerV2.NewTriggerEngineRegistry(engineRegistry),
++		workflowLimits,
++		clockwork.NewRealClock(),
++	)
++
+ 	handlerOpts := []syncerV2.EventHandlerOption{
+ 		syncerV2.WithBillingClient(billingClient),
+ 		syncerV2.WithWorkflowRegistry(capCfg.WorkflowRegistry().Address(), selector),
+@@ -974,9 +993,7 @@ func newWorkflowRegistrySyncerV2(
+ 		syncerV2.WithShardRoutingSteady(shardRoutingSteady),
+ 		syncerV2.WithShardResolver(shardResolver),
+ 		syncerV2.WithShardIndex(uint32(cfg.Sharding().ShardIndex())),
+-		syncerV2.WithTriggerCoordinator(
+-			triggers.NewCoordinator(opts.CapabilitiesRegistry, syncerV2.NewTriggerEngineRegistry(engineRegistry), clockwork.NewRealClock(), lggr),
+-		),
++		syncerV2.WithTriggerCoordinator(triggerCoordinator),
+ 	}
+ 	if shardingEnabled && dispatcher != nil {
+ 		handlerOpts = append(handlerOpts,
+diff --git a/core/services/workflows/syncer/v2/handler.go b/core/services/workflows/syncer/v2/handler.go
+index 840a02af6f4..417d0c19ec9 100644
+--- a/core/services/workflows/syncer/v2/handler.go
++++ b/core/services/workflows/syncer/v2/handler.go
+@@ -758,7 +758,7 @@ func (h *eventHandler) workflowRegisteredEvent(
+ 
+ 	// Let's try to clean one up if it exists
+ 	if spec.Status != job.WorkflowSpecStatusActive {
+-		return h.tryEngineCleanup(payload.WorkflowID)
++		return h.tryEngineCleanup(ctx, payload.WorkflowID)
+ 	}
+ 
+ 	// We know we need an engine, let's make sure that there isn't already one running for this workflow ID.
+@@ -785,7 +785,7 @@ func (h *eventHandler) workflowRegisteredEvent(
+ 	// - state isn't active
+ 	// Let's clean up and recreate
+ 
+-	cleanupErr := h.tryEngineCleanup(payload.WorkflowID)
++	cleanupErr := h.tryEngineCleanup(ctx, payload.WorkflowID)
+ 	if cleanupErr != nil {
+ 		return fmt.Errorf("could not clean up old engine: %w", cleanupErr)
+ 	}
+@@ -993,9 +993,7 @@ func (h *eventHandler) newEngine(ctx context.Context, workflowID, owner string,
+ 
+ 	construct := v2.NewEngine
+ 	if h.useCoordinatedEngine(ctx, workflowID) {
+-		// The trigger coordinator is not implemented yet, so a workflow routed here
+-		// will never receive triggers. Warn once per engine creation with the workflowID
+-		h.lggr.Warnw("Routing workflow to the coordinated engine; trigger delivery is not implemented yet",
++		h.lggr.Infow("Routing workflow to the coordinated engine",
+ 			"workflowID", workflowID, "workflowName", name, "workflowOwner", owner)
+ 
+ 		cfg.TriggerAcknowledger = h.triggerCoordinator
+@@ -1051,7 +1049,7 @@ func (h *eventHandler) stopEngine(ctx context.Context, workflowID types.Workflow
+ 		// on coordinated engines, stop coordinator ingress before draining,
+ 		// so the drain can actually reach zero active executions.
+ 		if e.Coordinated() && h.triggerCoordinator != nil {
+-			if err := h.triggerCoordinator.UnregisterTriggers(workflowID.Hex()); err != nil && !errors.Is(err, triggers.ErrWorkflowNotCoordinated) {
++			if err := h.triggerCoordinator.UnregisterTriggers(ctx, workflowID.Hex()); err != nil && !errors.Is(err, triggers.ErrWorkflowNotCoordinated) {
+ 				h.lggr.Errorw("Failed to unregister triggers via coordinator", "workflowID", workflowID.String(), "err", err)
+ 			}
+ 		}
+@@ -1175,7 +1173,7 @@ func (h *eventHandler) ListWorkflowSpecs(ctx context.Context) ([]*job.WorkflowSp
+ 
+ // tryEngineCleanup attempts to stop the workflow engine for the given workflow ID.  Does nothing if the
+ // workflow engine is not running.
+-func (h *eventHandler) tryEngineCleanup(workflowID types.WorkflowID) error {
++func (h *eventHandler) tryEngineCleanup(ctx context.Context, workflowID types.WorkflowID) error {
+ 	e, ok := h.engineRegistry.Get(workflowID)
+ 	if !ok {
+ 		return nil
+@@ -1186,7 +1184,7 @@ func (h *eventHandler) tryEngineCleanup(workflowID types.WorkflowID) error {
+ 	// stopEngine's coordinator handling, or trigger registrations are left
+ 	// orphaned on this path alone.
+ 	if e.Coordinated() && h.triggerCoordinator != nil {
+-		if err := h.triggerCoordinator.UnregisterTriggers(workflowID.Hex()); err != nil && !errors.Is(err, triggers.ErrWorkflowNotCoordinated) {
++		if err := h.triggerCoordinator.UnregisterTriggers(ctx, workflowID.Hex()); err != nil && !errors.Is(err, triggers.ErrWorkflowNotCoordinated) {
+ 			h.lggr.Errorw("Failed to unregister triggers via coordinator", "workflowID", workflowID.String(), "err", err)
+ 		}
+ 	}
+@@ -1307,15 +1305,10 @@ func (h *eventHandler) tryCoordinatedEngineCreate(ctx context.Context, spec *job
+ 	donID := localNode.WorkflowDON.ID
+ 
+ 	triggerIDs, err := h.triggerCoordinator.RegisterTriggers(ctx, engine, triggers.RegistrationParams{
+-		WorkflowOwner:       spec.WorkflowOwner,
+-		WorkflowName:        in.workflowName.Hex(),
+-		DecodedWorkflowName: in.workflowName.String(),
+-		WorkflowTag:         spec.WorkflowTag,
+-		WorkflowDonID:       donID,
+-		// pinnedWorkflowDonConfigVersion in v2 pins this to 1 to avoid forcing
+-		// forwarder updates on config churn; mirrored here since the syncer
+-		// can't reference that unexported v2 constant.
+-		WorkflowDonConfigVersion:      1,
++		WorkflowOwner:                 spec.WorkflowOwner,
++		WorkflowName:                  in.workflowName,
++		WorkflowTag:                   spec.WorkflowTag,
++		WorkflowDonID:                 donID,
+ 		WorkflowRegistryChainSelector: h.workflowRegistryChainSelector,
+ 		WorkflowRegistryAddress:       h.workflowRegistryAddress,
+ 	})
+diff --git a/core/services/workflows/syncer/v2/handler_test.go b/core/services/workflows/syncer/v2/handler_test.go
+index 59146bafca7..50a50effc53 100644
+--- a/core/services/workflows/syncer/v2/handler_test.go
++++ b/core/services/workflows/syncer/v2/handler_test.go
+@@ -1562,13 +1562,13 @@ func Test_tryEngineCleanup_ClosesEngineThenRemovesFromRegistry(t *testing.T) {
+ 		engineRegistry: registry,
+ 	}
+ 
+-	require.NoError(t, h.tryEngineCleanup(workflowID))
++	require.NoError(t, h.tryEngineCleanup(t.Context(), workflowID))
+ 	assert.Equal(t, int32(1), engine.closeCalls.Load())
+ 	_, ok := registry.Get(workflowID)
+ 	assert.False(t, ok, "engine should be removed from the registry after a successful close")
+ 
+ 	// Cleanup for an already-removed workflow is a no-op and does not close again.
+-	require.NoError(t, h.tryEngineCleanup(workflowID))
++	require.NoError(t, h.tryEngineCleanup(t.Context(), workflowID))
+ 	assert.Equal(t, int32(1), engine.closeCalls.Load())
+ }
+ 
+@@ -1587,13 +1587,13 @@ func Test_tryEngineCleanup_KeepsEngineInRegistryOnCloseFailure(t *testing.T) {
+ 	}
+ 
+ 	// A failing close leaves the engine in the registry so the cleanup can be retried later.
+-	require.Error(t, h.tryEngineCleanup(workflowID))
++	require.Error(t, h.tryEngineCleanup(t.Context(), workflowID))
+ 	_, ok := registry.Get(workflowID)
+ 	require.True(t, ok, "engine must remain in the registry so the close can be retried")
+ 
+ 	// Once the (spurious) failure clears, the retry succeeds and only then is the engine removed.
+ 	engine.CloseErr = nil
+-	require.NoError(t, h.tryEngineCleanup(workflowID))
++	require.NoError(t, h.tryEngineCleanup(t.Context(), workflowID))
+ 	assert.Equal(t, int32(2), engine.closeCalls.Load())
+ 	_, ok = registry.Get(workflowID)
+ 	assert.False(t, ok)
+@@ -1615,7 +1615,7 @@ func Test_tryEngineCleanup_ToleratesErrAlreadyStopped(t *testing.T) {
+ 
+ 	// ErrAlreadyStopped means the engine was already closed on a prior attempt; treat it as
+ 	// success and remove the registry entry.
+-	require.NoError(t, h.tryEngineCleanup(workflowID))
++	require.NoError(t, h.tryEngineCleanup(t.Context(), workflowID))
+ 	_, ok := registry.Get(workflowID)
+ 	assert.False(t, ok)
+ }
+diff --git a/core/services/workflows/v2/triggers/coordinator.go b/core/services/workflows/v2/triggers/coordinator.go
+index 848a2b10163..2506454f02c 100644
+--- a/core/services/workflows/v2/triggers/coordinator.go
++++ b/core/services/workflows/v2/triggers/coordinator.go
+@@ -3,12 +3,20 @@ package triggers
+ import (
+ 	"context"
+ 	"errors"
++	"fmt"
++	"sync"
++	"sync/atomic"
++	"time"
+ 
+ 	"github.com/jonboulle/clockwork"
+ 
+-	"github.com/smartcontractkit/chainlink-common/pkg/capabilities/registry"
++	"github.com/smartcontractkit/chainlink-common/pkg/contexts"
+ 	"github.com/smartcontractkit/chainlink-common/pkg/logger"
+ 	"github.com/smartcontractkit/chainlink-common/pkg/services"
++	"github.com/smartcontractkit/chainlink-common/pkg/settings"
++	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
++	"github.com/smartcontractkit/chainlink/v2/core/platform"
++	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/monitoring"
+ 	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/types"
+ )
+ 
+@@ -16,15 +24,22 @@ import (
+ // a workflowID the coordinator never registered.
+ var ErrWorkflowNotCoordinated = errors.New("workflow not registered with the trigger coordinator")
+ 
++const (
++	defaultDrainTimeout = 10 * time.Minute
++	shutdownTimeout     = 5 * time.Second
++
++	// pinnedWorkflowDonConfigVersion mirrors v2's pin to 1, so config updates on
++	// the registry don't force forwarder contract updates.
++	pinnedWorkflowDonConfigVersion = 1
++)
++
+ // RegistrationParams is the per-workflow metadata RegisterTriggers needs to
+ // build each capability's RequestMetadata.
+ type RegistrationParams struct {
+ 	WorkflowOwner                 string
+-	WorkflowName                  string
+-	DecodedWorkflowName           string
++	WorkflowName                  types.WorkflowName
+ 	WorkflowTag                   string
+ 	WorkflowDonID                 uint32
+-	WorkflowDonConfigVersion      uint32
+ 	WorkflowRegistryChainSelector string
+ 	WorkflowRegistryAddress       string
+ }
+@@ -46,11 +61,11 @@ type Coordinator interface {
+ 
+ 	// UnregisterTriggers stops ingress for workflowID immediately (unregisters with the capability registry)
+ 	// and cleans up the handle map once the engine has been drained and closed, so an execution already in flight
+-	// can still resolve its handle to ACK. It also ensures that any resources associated with the workflow are properly released.
+-	// This includes managing the workflowLimits by calling workflowLimits.Free.
++	// can still resolve its handle to ACK. It also frees the workflow-count limit slot acquired at registration.
+ 	//
+-	// Returns ErrWorkflowNotCoordinated if workflowID was never registered here
+-	UnregisterTriggers(workflowID string) error
++	// Returns ErrWorkflowNotCoordinated if workflowID was never registered here.
++	// A failed capability unregistration is returned and retried on the next call.
++	UnregisterTriggers(ctx context.Context, workflowID string) error
+ }
+ 
+ // RegisteredEngine is what EngineRegistry.Get returns: a sink the coordinator
+@@ -72,46 +87,355 @@ type EngineRegistry interface {
+ 	Get(workflowID types.WorkflowID) (RegisteredEngine, bool)
+ }
+ 
+-// noopCoordinator is a no-op implementation type.  It logs the registration
+-// and teardown calls on Register/UnregisterTriggers, and does nothing else. No trigger is
+-// registered with the capability registry and no event is ever delivered.
+-type noopCoordinator struct {
++type coordinator struct {
+ 	services.Service
+ 	eng  *services.Engine
+ 	lggr logger.Logger
++
++	// deps carries the node-level logger and metrics; RegisterTriggers
++	// overrides both with the workflow-scoped ones.
++	deps           RegisterDeps
++	engines        EngineRegistry
++	workflowLimits limits.ResourceLimiter[int]
++	clock          clockwork.Clock
++
++	drainTimeout time.Duration
++
++	workflows *workflowRegistry
++}
++
++// coordinatedWorkflow represents the state of a workflow's triggers within the coordinator.
++// A successful call to RegisterTriggers creates a coordinatedWorkflow.
++// It tracks the workflow ID, the context for cancellation, the handles for each trigger,
++// and the status of unregistration and release.
++type coordinatedWorkflow struct {
++	wid   types.WorkflowID
++	cre   contexts.CRE
++	donID uint32
++	// cancel stops reading all trigger events for this coordinated workflow instance.
++	// A workflow can be re-registered to the same triggers multiple times. This cancellation,
++	// is independent of subsequent trigger registrations.
++	cancel  context.CancelFunc
++	handles map[string]*Handle
++
++	// readers tracks the reader goroutines for this registration. A reader
++	// only exits once its own delivery has returned, so once Wait() returns,
++	// nothing started by this registration can still ACK.
++	readers sync.WaitGroup
++
++	unregistered atomic.Bool // capability-side unregistration succeeded
++	releasing    atomic.Bool // release waiter spawned
++
++	lggr    logger.Logger
++	metrics *monitoring.WorkflowsMetricLabeler
+ }
+ 
+-func NewCoordinator(capReg registry.CapabilitiesRegistry, engineRegistry EngineRegistry, clock clockwork.Clock, lggr logger.Logger) Coordinator {
+-	c := &noopCoordinator{
+-		lggr: logger.Named(lggr, "TriggerCoordinator"),
++func NewCoordinator(
++	deps RegisterDeps,
++	engineRegistry EngineRegistry,
++	workflowLimits limits.ResourceLimiter[int],
++	clock clockwork.Clock,
++) Coordinator {
++	c := &coordinator{
++		lggr:           logger.Named(deps.Logger, "TriggerCoordinator"),
++		deps:           deps,
++		engines:        engineRegistry,
++		workflowLimits: workflowLimits,
++		clock:          clock,
++		drainTimeout:   defaultDrainTimeout,
++		workflows:      newWorkflowRegistry(),
+ 	}
+ 
+ 	c.Service, c.eng = services.Config{
+-		Name: "TriggerCoordinator",
+-		Start: func(context.Context) error {
+-			c.lggr.Warnw("No-op trigger coordinator started: workflows on the coordinated engine will register no triggers and receive no events")
+-			return nil
+-		},
+-		Close: func() error { return nil },
++		Name:  "TriggerCoordinator",
++		Close: c.close,
+ 	}.NewServiceEngine(c.lggr)
+ 
+ 	return c
+ }
+ 
+-func (c *noopCoordinator) RegisterTriggers(ctx context.Context, subscriber Subscriber, params RegistrationParams) ([]string, error) {
+-	c.lggr.Infow("No-op RegisterTriggers",
+-		"workflowID", subscriber.Tenant().Workflow,
+-		"workflowOwner", params.WorkflowOwner,
+-		"workflowName", params.DecodedWorkflowName,
+-		"workflowDonID", params.WorkflowDonID)
+-	return []string{}, nil
++func (c *coordinator) RegisterTriggers(ctx context.Context, subscriber Subscriber, params RegistrationParams) (triggerCapIDs []string, err error) {
++	cre := subscriber.Tenant()
++	workflowID := cre.Workflow
++	wid, idErr := types.WorkflowIDFromHex(workflowID)
++	if idErr != nil {
++		return nil, fmt.Errorf("invalid workflow id %q: %w", workflowID, idErr)
++	}
++	ctx = contexts.WithCRE(ctx, cre)
++
++	lggr := logger.With(c.lggr, "workflowID", workflowID)
++	wfMetrics := c.deps.Metrics.With(
++		platform.KeyWorkflowID, workflowID,
++		platform.KeyWorkflowOwner, params.WorkflowOwner,
++		platform.KeyWorkflowName, params.WorkflowName.String(),
++		platform.KeyOrganizationID, cre.Org,
++	)
++
++	// Registration IDs derive from the workflowID, so a leftover registration
++	// must be unregistered first: unregistering it later would remove this one.
++	if err = c.UnregisterTriggers(ctx, workflowID); err != nil && !errors.Is(err, ErrWorkflowNotCoordinated) {
++		lggr.Errorw("Failed to unregister previous trigger registration", "err", err)
++	}
++
++	if err = c.useWorkflowLimit(ctx, lggr, wfMetrics); err != nil {
++		return nil, err
++	}
++	// Any failure return frees the limit slot because of the named err.
++	// Keep returns explicit (no naked return) so the defer always sees the final err.
++	defer func() {
++		if err != nil {
++			c.freeWorkflowLimit(ctx, lggr)
++		}
++	}()
++
++	subs, err := subscriber.Subscribe(ctx)
++	if err != nil {
++		return nil, fmt.Errorf("failed to subscribe to triggers: %w", err)
++	}
++
++	deps := c.deps
++	deps.Logger = lggr
++	deps.Metrics = wfMetrics
++	triggerCapIDs, handles, eventChans, err := Register(ctx, deps, RegisterMetadata{
++		WorkflowID:                    workflowID,
++		WorkflowOwner:                 params.WorkflowOwner,
++		WorkflowName:                  params.WorkflowName,
++		WorkflowTag:                   params.WorkflowTag,
++		WorkflowDonID:                 params.WorkflowDonID,
++		WorkflowDonConfigVersion:      pinnedWorkflowDonConfigVersion,
++		WorkflowRegistryChainSelector: params.WorkflowRegistryChainSelector,
++		WorkflowRegistryAddress:       params.WorkflowRegistryAddress,
++		OrgID:                         cre.Org,
++	}, subs)
++	if err != nil {
++		return nil, err
++	}
++
++	readerCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
++	cw := &coordinatedWorkflow{
++		wid:     wid,
++		cre:     cre,
++		donID:   params.WorkflowDonID,
++		cancel:  cancel,
++		handles: handles,
++		lggr:    lggr,
++		metrics: wfMetrics,
++	}
++
++	// Set before publishing cw: an UnregisterTriggers racing in right after
++	// must not see zero readers and release before they've even started.
++	cw.readers.Add(len(eventChans))
++
++	c.workflows.set(workflowID, cw)
++
++	deliverFn := c.buildDeliverFn(cw.wid, cw.lggr)
++	for idx, eventCh := range eventChans {
++		triggerCapID := triggerCapIDs[idx]
++		c.eng.GoCtx(readerCtx, func(ctx context.Context) {
++			defer cw.readers.Done()
++			ReadLoop(ctx, lggr, wfMetrics, c.clock, workflowID, triggerCapID, idx, eventCh, deliverFn)
++		})
++	}
++
++	return triggerCapIDs, nil
+ }
+ 
+-func (c *noopCoordinator) Ack(ctx context.Context, triggerCapID, triggerRegistrationID, eventID string) error {
++func (c *coordinator) UnregisterTriggers(ctx context.Context, workflowID string) error {
++	cw, ok := c.workflows.get(workflowID)
++	if !ok {
++		return ErrWorkflowNotCoordinated
++	}
++	if cw.unregistered.Load() {
++		return nil
++	}
++	// CAS: exactly one caller spawns the release waiter.
++	spawnRelease := cw.releasing.CompareAndSwap(false, true)
++
++	// call cancel to stop all reader goroutines associated with this workflow.
++	cw.cancel()
++	if spawnRelease {
++		c.eng.Go(func(ctx context.Context) { c.releaseWhenDrained(ctx, cw) })
++	}
++
++	ctx, cancel := c.eng.Ctx(ctx)
++	defer cancel()
++	ctx = contexts.WithCRE(ctx, cw.cre)
++
++	if failCount := Unregister(ctx, cw.lggr, workflowID, cw.donID, cw.handles); failCount > 0 {
++		return fmt.Errorf("failed to unregister %d of %d triggers", failCount, len(cw.handles))
++	}
++
++	cw.unregistered.Store(true)
++
++	cw.lggr.Infow("Unregistered triggers, retaining handles until drained", "numTriggers", len(cw.handles))
++	cw.metrics.IncrementWorkflowUnregisteredCounter(ctx)
+ 	return nil
+ }
+ 
+-func (c *noopCoordinator) UnregisterTriggers(workflowID string) error {
+-	c.lggr.Infow("No-op UnregisterTriggers", "workflowID", workflowID)
+-	return nil
++func (c *coordinator) Ack(ctx context.Context, triggerCapID, triggerRegistrationID, eventID string) error {
++	workflowID, err := ParseWorkflowID(triggerRegistrationID)
++	if err != nil {
++		return err
++	}
++
++	var handle *Handle
++	lggr, wfMetrics := c.lggr, c.deps.Metrics
++	if cw, ok := c.workflows.get(workflowID); ok {
++		handle = cw.handles[triggerRegistrationID]
++		lggr, wfMetrics = cw.lggr, cw.metrics
++	}
++	return Ack(ctx, lggr, wfMetrics, triggerCapID, triggerRegistrationID, eventID, handle)
++}
++
++// close runs after the reader and release goroutines exit.
++// It unregisters any triggers still in a pending state before returning.
++func (c *coordinator) close() error {
++	pending := c.workflows.pending()
++
++	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
++	defer cancel()
++
++	var errs error
++	for workflowID, cw := range pending {
++		cw.cancel()
++		if failCount := Unregister(contexts.WithCRE(ctx, cw.cre), cw.lggr, workflowID, cw.donID, cw.handles); failCount > 0 {
++			errs = errors.Join(errs, fmt.Errorf("workflow %s: failed to unregister %d of %d triggers", workflowID, failCount, len(cw.handles)))
++		}
++	}
++	return errs
++}
++
++// buildDeliverFn creates a deliver function that looks up the engine fresh on every event
++// instead of caching it, since the engine for a workflow can change while this reader is running.
++func (c *coordinator) buildDeliverFn(wid types.WorkflowID, lggr logger.Logger) func(context.Context, CoordinatedEvent) {
++	return func(ctx context.Context, event CoordinatedEvent) {
++		engine, found := c.engines.Get(wid)
++		if !found {
++			lggr.Infow("Engine gone, dropping trigger event", "triggerID", event.TriggerCapID)
++			return
++		}
++		if !engine.IsCoordinated() {
++			lggr.Errorw("Engine is not coordinated, dropping trigger event", "triggerID", event.TriggerCapID)
++			return
++		}
++
++		// WithoutCancel: unregistering stops ingress, it must not kill an execution already running.
++		if err := engine.ExecuteTrigger(context.WithoutCancel(ctx), event); err != nil {
++			lggr.Errorw("Failed to execute trigger event", "triggerID", event.TriggerCapID, "err", err)
++		}
++	}
++}
++
++// releaseWhenDrained drops the registration and frees the workflow-count limit
++// once no execution can still need it to ACK. Waiting for this registration's
++// readers to exit is enough: an ACK only ever happens while a reader is still
++// running its delivery.
++func (c *coordinator) releaseWhenDrained(ctx context.Context, cw *coordinatedWorkflow) {
++	ctx = contexts.WithCRE(ctx, cw.cre)
++
++	select {
++	case <-cw.drained():
++	case <-c.clock.After(c.drainTimeout):
++		cw.lggr.Errorw("Timed out waiting for drain, releasing trigger handles anyway")
++	case <-ctx.Done():
++		return
++	}
++
++	c.workflows.deleteIf(cw.wid.Hex(), cw)
++
++	c.freeWorkflowLimit(ctx, cw.lggr)
++	cw.lggr.Infow("Released trigger handles")
++}
++
++// useWorkflowLimit acquires one slot of the node's workflow-count limit,
++// mapping a limit breach to the scope-specific sentinel the syncer expects.
++func (c *coordinator) useWorkflowLimit(ctx context.Context, lggr logger.Logger, wfMetrics *monitoring.WorkflowsMetricLabeler) error {
++	err := c.workflowLimits.Use(ctx, 1)
++	if err == nil {
++		return nil
++	}
++
++	errLimited, ok := errors.AsType[limits.ErrorResourceLimited[int]](err)
++	if !ok {
++		return err
++	}
++	switch errLimited.Scope {
++	case settings.ScopeOwner:
++		lggr.Infow("Per owner workflow count limit reached", "err", err)
++		wfMetrics.IncrementWorkflowLimitPerOwnerCounter(ctx)
++		return types.ErrPerOwnerWorkflowCountLimitReached
++	case settings.ScopeGlobal:
++		lggr.Infow("Global workflow count limit reached", "err", err)
++		wfMetrics.IncrementWorkflowLimitGlobalCounter(ctx)
++		return types.ErrGlobalWorkflowCountLimitReached
++	default:
++		lggr.Errorw("Workflow count limit reached for unexpected scope", "scope", errLimited.Scope, "err", err)
++		return err
++	}
++}
++
++// freeWorkflowLimit expects ctx to carry the workflow's CRE: the limit is keyed on it.
++func (c *coordinator) freeWorkflowLimit(ctx context.Context, lggr logger.Logger) {
++	if err := c.workflowLimits.Free(ctx, 1); err != nil {
++		lggr.Errorw("Failed to free workflow count limit", "err", err)
++	}
++}
++
++// drained returns a channel that will be closed once all readers have finished, indicating that the workflow triggers have been fully drained.
++func (cw *coordinatedWorkflow) drained() chan struct{} {
++	drained := make(chan struct{})
++	// Exits with the readers; outlives this waiter only on a timeout.
++	go func() {
++		cw.readers.Wait()
++		close(drained)
++	}()
++	return drained
++}
++
++// workflowRegistry guards the workflowID -> triggers map so coordinator
++// methods never handle the mutex directly.
++type workflowRegistry struct {
++	mu        sync.Mutex
++	workflows map[string]*coordinatedWorkflow // workflowID (hex) -> state
++}
++
++func newWorkflowRegistry() *workflowRegistry {
++	return &workflowRegistry{workflows: make(map[string]*coordinatedWorkflow)}
++}
++
++func (r *workflowRegistry) get(workflowID string) (*coordinatedWorkflow, bool) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	cw, ok := r.workflows[workflowID]
++	return cw, ok
++}
++
++func (r *workflowRegistry) set(workflowID string, cw *coordinatedWorkflow) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	r.workflows[workflowID] = cw
++}
++
++// deleteIf removes workflowID only if it still maps to cw: the workflow may
++// have been re-registered while draining, and that state is not ours to drop.
++func (r *workflowRegistry) deleteIf(workflowID string, cw *coordinatedWorkflow) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	if r.workflows[workflowID] == cw {
++		delete(r.workflows, workflowID)
++	}
++}
++
++// pending returns the workflows whose capability-side unregistration has not
++// completed yet.
++func (r *workflowRegistry) pending() map[string]*coordinatedWorkflow {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	pending := make(map[string]*coordinatedWorkflow, len(r.workflows))
++	for workflowID, cw := range r.workflows {
++		if !cw.unregistered.Load() {
++			pending[workflowID] = cw
++		}
++	}
++	return pending
+ }
+diff --git a/core/services/workflows/v2/triggers/coordinator_helpers_test.go b/core/services/workflows/v2/triggers/coordinator_helpers_test.go
+new file mode 100644
+index 00000000000..a53b52e98ba
+--- /dev/null
++++ b/core/services/workflows/v2/triggers/coordinator_helpers_test.go
+@@ -0,0 +1,214 @@
++package triggers
++
++import (
++	"context"
++	"sync"
++	"testing"
++
++	"github.com/jonboulle/clockwork"
++	"github.com/stretchr/testify/mock"
++	"github.com/stretchr/testify/require"
++
++	"github.com/smartcontractkit/chainlink-common/pkg/capabilities"
++	"github.com/smartcontractkit/chainlink-common/pkg/contexts"
++	"github.com/smartcontractkit/chainlink-common/pkg/services/servicetest"
++	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
++	regmocks "github.com/smartcontractkit/chainlink-common/pkg/types/core/mocks"
++	sdkpb "github.com/smartcontractkit/chainlink-protos/cre/go/sdk"
++	capmocks "github.com/smartcontractkit/chainlink/v2/core/capabilities/mocks"
++	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/types"
++)
++
++const (
++	testTriggerCapID = "cron-trigger@1.0.0"
++	testMethod       = "Trigger"
++	testOwner        = "abcdef" // already normalized: contexts.WithCRE strips a 0x prefix
++	testOrg          = "org-1"
++	testDonID        = uint32(7)
++)
++
++var testTenant = contexts.CRE{Org: testOrg, Owner: testOwner, Workflow: validWorkflowID}
++
++type fakeSubscriber struct {
++	tenant contexts.CRE
++	subs   []*sdkpb.TriggerSubscription
++	err    error
++	calls  int
++}
++
++func (s *fakeSubscriber) Subscribe(context.Context) ([]*sdkpb.TriggerSubscription, error) {
++	s.calls++
++	return s.subs, s.err
++}
++
++func (s *fakeSubscriber) Tenant() contexts.CRE { return s.tenant }
++
++type fakeEngine struct {
++	coordinated bool
++	// execute, if set, runs inside ExecuteTrigger on the reader goroutine.
++	execute func(ctx context.Context, event CoordinatedEvent)
++
++	mu      sync.Mutex
++	events  []CoordinatedEvent
++	tenants []contexts.CRE
++}
++
++func (e *fakeEngine) ExecuteTrigger(ctx context.Context, event CoordinatedEvent) error {
++	e.mu.Lock()
++	e.events = append(e.events, event)
++	e.tenants = append(e.tenants, contexts.CREValue(ctx))
++	e.mu.Unlock()
++	if e.execute != nil {
++		e.execute(ctx, event)
++	}
++	return nil
++}
++
++func (e *fakeEngine) IsCoordinated() bool { return e.coordinated }
++
++func (e *fakeEngine) executed() []CoordinatedEvent {
++	e.mu.Lock()
++	defer e.mu.Unlock()
++	return append([]CoordinatedEvent(nil), e.events...)
++}
++
++type fakeEngineRegistry struct {
++	mu      sync.Mutex
++	engines map[types.WorkflowID]RegisteredEngine
++}
++
++func newFakeEngineRegistry() *fakeEngineRegistry {
++	return &fakeEngineRegistry{engines: make(map[types.WorkflowID]RegisteredEngine)}
++}
++
++func (r *fakeEngineRegistry) Get(wid types.WorkflowID) (RegisteredEngine, bool) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	e, ok := r.engines[wid]
++	return e, ok
++}
++
++func (r *fakeEngineRegistry) set(wid types.WorkflowID, e RegisteredEngine) {
++	r.mu.Lock()
++	defer r.mu.Unlock()
++	r.engines[wid] = e
++}
++
++// fakeWorkflowLimits counts slots, recording the tenant each call was scoped to.
++type fakeWorkflowLimits struct {
++	mu      sync.Mutex
++	used    int
++	frees   int
++	useErr  error
++	tenants []contexts.CRE
++}
++
++func (l *fakeWorkflowLimits) Close() error                           { return nil }
++func (l *fakeWorkflowLimits) Limit(context.Context) (int, error)     { return 100, nil }
++func (l *fakeWorkflowLimits) Available(context.Context) (int, error) { return 100, nil }
++func (l *fakeWorkflowLimits) Use(ctx context.Context, amount int) error {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	l.tenants = append(l.tenants, contexts.CREValue(ctx))
++	if l.useErr != nil {
++		return l.useErr
++	}
++	l.used += amount
++	return nil
++}
++func (l *fakeWorkflowLimits) Free(ctx context.Context, amount int) error {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	l.tenants = append(l.tenants, contexts.CREValue(ctx))
++	l.used -= amount
++	l.frees++
++	return nil
++}
++func (l *fakeWorkflowLimits) inUse() int {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	return l.used
++}
++func (l *fakeWorkflowLimits) freeCount() int {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	return l.frees
++}
++
++type coordinatorFixture struct {
++	c       *coordinator
++	capReg  *regmocks.CapabilitiesRegistry
++	engines *fakeEngineRegistry
++	limits  *fakeWorkflowLimits
++	clock   *clockwork.FakeClock
++	wid     types.WorkflowID
++	engine  *fakeEngine
++}
++
++// newCoordinatorFixture starts a coordinator with one coordinated engine
++// already in the registry for testTenant's workflow.
++func newCoordinatorFixture(t *testing.T) *coordinatorFixture {
++	t.Helper()
++	capReg := regmocks.NewCapabilitiesRegistry(t)
++	engines := newFakeEngineRegistry()
++	wfLimits := &fakeWorkflowLimits{}
++	clock := clockwork.NewFakeClock()
++
++	wid, err := types.WorkflowIDFromHex(validWorkflowID)
++	require.NoError(t, err)
++	engine := &fakeEngine{coordinated: true}
++	engines.set(wid, engine)
++
++	c := NewCoordinator(newRegisterDeps(t, capReg, limits.NewGateLimiter(true)), engines, wfLimits, clock)
++	servicetest.Run(t, c)
++
++	return &coordinatorFixture{
++		c: c.(*coordinator), capReg: capReg, engines: engines, limits: wfLimits,
++		clock: clock, wid: wid, engine: engine,
++	}
++}
++
++// expectTrigger wires a trigger capability that hands back a fresh event channel on registration.
++func (f *coordinatorFixture) expectTrigger(t *testing.T) (*capmocks.TriggerCapability, chan capabilities.TriggerResponse) {
++	t.Helper()
++	trigger := capmocks.NewTriggerCapability(t)
++	eventCh := make(chan capabilities.TriggerResponse)
++	trigger.EXPECT().RegisterTrigger(mock.Anything, mock.Anything).
++		Return((<-chan capabilities.TriggerResponse)(eventCh), nil).Once()
++	f.capReg.EXPECT().GetTrigger(mock.Anything, testTriggerCapID).Return(trigger, nil).Once()
++	return trigger, eventCh
++}
++
++func newTestSubscriber() *fakeSubscriber {
++	return &fakeSubscriber{
++		tenant: testTenant,
++		subs:   []*sdkpb.TriggerSubscription{{Id: testTriggerCapID, Method: testMethod}},
++	}
++}
++
++func testParams(t *testing.T) RegistrationParams {
++	t.Helper()
++	name, err := types.NewWorkflowName("my-workflow")
++	require.NoError(t, err)
++	return RegistrationParams{WorkflowOwner: testOwner, WorkflowName: name, WorkflowDonID: testDonID}
++}
++
++func (f *coordinatorFixture) registered() bool {
++	_, ok := f.c.workflows.get(validWorkflowID)
++	return ok
++}
++
++func triggerEvent(id string) capabilities.TriggerResponse {
++	return capabilities.TriggerResponse{Event: capabilities.TriggerEvent{TriggerType: testTriggerCapID, ID: id}}
++}
++
++// blockingExecution makes the fixture engine park inside ExecuteTrigger until
++// release is closed, signalling started once it is in flight.
++func (f *coordinatorFixture) blockingExecution() (started chan struct{}, release chan struct{}) {
++	started, release = make(chan struct{}, 1), make(chan struct{})
++	f.engine.execute = func(context.Context, CoordinatedEvent) {
++		started <- struct{}{}
++		<-release
++	}
++	return started, release
++}
+diff --git a/core/services/workflows/v2/triggers/coordinator_test.go b/core/services/workflows/v2/triggers/coordinator_test.go
+new file mode 100644
+index 00000000000..299c21f0514
+--- /dev/null
++++ b/core/services/workflows/v2/triggers/coordinator_test.go
+@@ -0,0 +1,416 @@
++package triggers
++
++import (
++	"context"
++	"errors"
++	"testing"
++	"time"
++
++	"github.com/jonboulle/clockwork"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/mock"
++	"github.com/stretchr/testify/require"
++
++	"github.com/smartcontractkit/chainlink-common/pkg/capabilities"
++	"github.com/smartcontractkit/chainlink-common/pkg/settings"
++	"github.com/smartcontractkit/chainlink-common/pkg/settings/limits"
++	regmocks "github.com/smartcontractkit/chainlink-common/pkg/types/core/mocks"
++	capmocks "github.com/smartcontractkit/chainlink/v2/core/capabilities/mocks"
++	"github.com/smartcontractkit/chainlink/v2/core/services/workflows/types"
++)
++
++// TestCoordinator_RegisterTriggers covers registration: the happy path with event
++// delivery, and each failure path that must free the workflow-count limit slot.
++func TestCoordinator_RegisterTriggers(t *testing.T) {
++	t.Parallel()
++
++	t.Run("registers triggers and delivers events to the engine", func(t *testing.T) {
++		t.Parallel()
++		f := newCoordinatorFixture(t)
++		var gotReq capabilities.TriggerRegistrationRequest
++		eventCh := make(chan capabilities.TriggerResponse)
++		trigger := capmocks.NewTriggerCapability(t)
++		trigger.EXPECT().RegisterTrigger(mock.Anything, mock.Anything).
++			Run(func(_ context.Context, req capabilities.TriggerRegistrationRequest) { gotReq = req }).
++			Return((<-chan capabilities.TriggerResponse)(eventCh), nil).Once()
++		trigger.EXPECT().UnregisterTrigger(mock.Anything, mock.Anything).Return(nil).Maybe()
++		f.capReg.EXPECT().GetTrigger(mock.Anything, testTriggerCapID).Return(trigger, nil).Once()
++
++		triggerIDs, err := f.c.RegisterTriggers(t.Context(), newTestSubscriber(), testParams(t))
++		require.NoError(t, err)
++		assert.Equal(t, []string{testTriggerCapID}, triggerIDs)
++		assert.Equal(t, 1, f.limits.inUse())
++		assert.True(t, f.registered())
++
++		assert.Equal(t, RegistrationID(validWorkflowID, 0), gotReq.TriggerID)
++		assert.Equal(t, validWorkflowID, gotReq.Metadata.WorkflowID)
++		assert.Equal(t, testOwner, gotReq.Metadata.WorkflowOwner)
++		assert.Equal(t, testDonID, gotReq.Metadata.WorkflowDonID)
++		assert.Equal(t, uint32(pinnedWorkflowDonConfigVersion), gotReq.Metadata.WorkflowDonConfigVersion)
++
++		eventCh <- triggerEvent("evt-1")
++		require.Eventually(t, func() bool { return len(f.engine.executed()) == 1 }, 5*time.Second, 10*time.Millisecond)
++
++		got := f.engine.executed()[0]
++		assert.Equal(t, validWorkflowID, got.WorkflowID)
++		assert.Equal(t, testTriggerCapID, got.TriggerCapID)
++		assert.Equal(t, 0, got.TriggerIndex)
++		assert.Equal(t, "evt-1", got.Event.Event.ID)
++		assert.Equal(t, f.clock.Now(), got.ObservedAt)
++
++		f.engine.mu.Lock()
++		assert.Equal(t, testTenant, f.engine.tenants[0], "execution ctx must carry the workflow's CRE")
++		f.engine.mu.Unlock()
++	})
++
++	t.Run("invalid workflow ID", func(t *testing.T) {
++		t.Parallel()
++		f := newCoordinatorFixture(t)
++		sub := newTestSubscriber()
++		sub.tenant.Workflow = "not-hex"
++
++		_, err := f.c.RegisterTriggers(t.Context(), sub, testParams(t))
++		require.ErrorContains(t, err, "invalid workflow id")
++		assert.Equal(t, 0, sub.calls)
++		assert.Equal(t, 0, f.limits.inUse())
++	})
++
++	t.Run("workflow limit reached maps to the scoped sentinel and never subscribes", func(t *testing.T) {
++		t.Parallel()
++		for _, tc := range []struct {
++			scope settings.Scope
++			want  error
++		}{
++			{settings.ScopeOwner, types.ErrPerOwnerWorkflowCountLimitReached},
++			{settings.ScopeGlobal, types.ErrGlobalWorkflowCountLimitReached},
++		} {
++			f := newCoordinatorFixture(t)
++			f.limits.useErr = limits.ErrorResourceLimited[int]{Scope: tc.scope, Limit: 1, Used: 1, Amount: 1}
++			sub := newTestSubscriber()
++
++			_, err := f.c.RegisterTriggers(t.Context(), sub, testParams(t))
++			require.ErrorIs(t, err, tc.want)
++			assert.Equal(t, 0, sub.calls)
++			assert.False(t, f.registered())
++		}
++	})
++
++	t.Run("the limit is acquired under the workflow's tenant", func(t *testing.T) {
++		t.Parallel()
++		f := newCoordinatorFixture(t)
++		f.limits.useErr = errors.New("boom")
++
++		_, err := f.c.RegisterTriggers(t.Context(), newTestSubscriber(), testParams(t))
++		require.Error(t, err)
++		f.limits.mu.Lock()
++		defer f.limits.mu.Unlock()
++		require.Len(t, f.limits.tenants, 1)
++		assert.Equal(t, testTenant, f.limits.tenants[0])
++	})
++
++	t.Run("subscribe failure frees the limit", func(t *testing.T) {
++		t.Parallel()
++		f := newCoordinatorFixture(t)
++		sub := newTestSubscriber()
++		sub.err = errors.New("wasm boom")
++
++		_, err := f.c.RegisterTriggers(t.Context(), sub, testParams(t))
++		require.ErrorContains(t, err, "failed to subscribe to triggers")
++		assert.Equal(t, 0, f.limits.inUse())
++		assert.False(t, f.registered())
++	})
++
++	t.Run("registration failure frees the limit and leaves nothing registered", func(t *testing.T) {
++		t.Parallel()
++		f := newCoordinatorFixture(t)
++		f.capReg.EXPECT().GetTrigger(mock.Anything, testTriggerCapID).Return(nil, errors.New("not found")).Once()
++
++		_, err := f.c.RegisterTriggers(t.Context(), newTestSubscriber(), testParams(t))
++		require.ErrorContains(t, err, "trigger capability not found")
++		assert.Equal(t, 0, f.limits.inUse())
++		assert.False(t, f.registered())
++	})
++}
++
++// TestCoordinator_NoDeliver covers dropped delivery: events must not reach an
++// engine that is gone from the registry or not coordinated.
++func TestCoordinator_NoDeliver(t *testing.T) {
++	t.Parallel()
++
++	for _, tc := range []struct {
++		name   string
++		mutate func(f *coordinatorFixture)
++	}{
++		{"drops events once the engine is gone from the registry", func(f *coordinatorFixture) {
++			f.engines.mu.Lock()
++			delete(f.engines.engines, f.wid)
++			f.engines.mu.Unlock()
++		}},
++		{"drops events for an engine that is not coordinated", func(f *coordinatorFixture) {
++			f.engine.coordinated = false
++		}},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			t.Parallel()
++			f := newCoordinatorFixture(t)
++			trigger, eventCh := f.expectTrigger(t)
++			trigger.EXPECT().UnregisterTrigger(mock.Anything, mock.Anything).Return(nil).Maybe()
++
++			_, err := f.c.RegisterTriggers(t.Context(), newTestSubscriber(), testParams(t))
++			require.NoError(t, err)
++			tc.mutate(f)
++
++			// The channel is unbuffered: the second send only completes once the
++			// reader has finished handling the first.
++			eventCh <- triggerEvent("evt-1")
++			eventCh <- triggerEvent("evt-2")
++			assert.Empty(t, f.engine.executed())
++		})
++	}
++}
++
++// TestCoordinator_Ack covers acknowledgement: routing to the registration's
++// handle, and the failure paths for unknown or malformed registration IDs.
++func TestCoordinator_Ack(t *testing.T) {
++	t.Parallel()
++
++	t.Run("routes to the registration's handle", func(t *testing.T) {
++		t.Parallel()
++		f := newCoordinatorFixture(t)
++		trigger, _ := f.expectTrigger(t)
++		trigger.EXPECT().UnregisterTrigger(mock.Anything, mock.Anything).Return(nil).Maybe()
++		regID := RegistrationID(validWorkflowID, 0)
++		trigger.EXPECT().AckEvent(mock.Anything, regID, "evt-1", testMethod).Return(nil).Once()
++
++		_, err := f.c.RegisterTriggers(t.Context(), newTestSubscriber(), testParams(t))
++		require.NoError(t, err)
++		require.NoError(t, f.c.Ack(t.Context(), testTriggerCapID, regID, "evt-1"))
++	})
++
++	t.Run("unknown workflow", func(t *testing.T) {
++		t.Parallel()
++		f := newCoordinatorFixture(t)
++		err := f.c.Ack(t.Context(), testTriggerCapID, RegistrationID(validWorkflowID, 0), "evt-1")
++		require.ErrorContains(t, err, "failed to find trigger")
++	})
++
++	t.Run("malformed registration ID", func(t *testing.T) {
++		t.Parallel()
++		f := newCoordinatorFixture(t)
++		err := f.c.Ack(t.Context(), testTriggerCapID, "not-a-registration", "evt-1")
++		require.ErrorContains(t, err, "invalid trigger registration ID")
++	})
++}
++
++// TestCoordinator_UnregisterTriggers covers unregistration: ingress stops
++// immediately, handles stay available until in-flight executions drain, and the
++// limit slot is freed exactly once, also on retry and on drain timeout.
++func TestCoordinator_UnregisterTriggers(t *testing.T) {
++	t.Parallel()
++
++	t.Run("unknown workflow", func(t *testing.T) {
++		t.Parallel()
++		f := newCoordinatorFixture(t)
++		require.ErrorIs(t, f.c.UnregisterTriggers(t.Context(), validWorkflowID), ErrWorkflowNotCoordinated)
++	})
++
++	t.Run("registration state is gone and the slot is freed when no execution is in flight", func(t *testing.T) {
++		t.Parallel()
++		f := newCoordinatorFixture(t)
++		trigger, _ := f.expectTrigger(t)
++		trigger.EXPECT().UnregisterTrigger(mock.Anything, mock.MatchedBy(func(req capabilities.TriggerRegistrationRequest) bool {
++			return req.TriggerID == RegistrationID(validWorkflowID, 0) && req.Method == testMethod
++		})).Return(nil).Once()
++
++		_, err := f.c.RegisterTriggers(t.Context(), newTestSubscriber(), testParams(t))
++		require.NoError(t, err)
++		require.NoError(t, f.c.UnregisterTriggers(t.Context(), validWorkflowID))
++
++		require.Eventually(t, func() bool { return !f.registered() && f.limits.inUse() == 0 }, 5*time.Second, 10*time.Millisecond)
++		assert.Equal(t, 1, f.limits.freeCount())
++		f.limits.mu.Lock()
++		assert.Equal(t, testTenant, f.limits.tenants[len(f.limits.tenants)-1], "the limit is freed under the workflow's tenant")
++		f.limits.mu.Unlock()
++	})
++
++	t.Run("keeps registration state and slot while an execution is in flight so it can still ACK", func(t *testing.T) {
++		t.Parallel()
++		f := newCoordinatorFixture(t)
++		trigger, eventCh := f.expectTrigger(t)
++		regID := RegistrationID(validWorkflowID, 0)
++		trigger.EXPECT().UnregisterTrigger(mock.Anything, mock.MatchedBy(func(req capabilities.TriggerRegistrationRequest) bool {
++			return req.TriggerID == regID && req.Method == testMethod
++		})).Return(nil).Once()
++		trigger.EXPECT().AckEvent(mock.Anything, regID, "evt-1", testMethod).Return(nil).Once()
++		started, release := f.blockingExecution()
++
++		_, err := f.c.RegisterTriggers(t.Context(), newTestSubscriber(), testParams(t))
++		require.NoError(t, err)
++		eventCh <- triggerEvent("evt-1")
++		<-started
++
++		require.NoError(t, f.c.UnregisterTriggers(t.Context(), validWorkflowID))
++
++		// The in-flight execution still resolves its handle.
++		require.NoError(t, f.c.Ack(t.Context(), testTriggerCapID, regID, "evt-1"))
++		assert.True(t, f.registered())
++		assert.Equal(t, 1, f.limits.inUse())
++
++		// Ingress is stopped: an event sent after unregister must never be
++		// delivered, including after the in-flight delivery returns. The send
++		// stays parked on the unbuffered channel until the reader exits.
++		go func() { eventCh <- triggerEvent("evt-2") }()
++
++		close(release)
++		require.Eventually(t, func() bool { return !f.registered() && f.limits.inUse() == 0 }, 5*time.Second, 10*time.Millisecond)
++
++		executed := f.engine.executed()
++		require.Len(t, executed, 1, "evt-2 must not be delivered after unregister")
++		assert.Equal(t, "evt-1", executed[0].Event.Event.ID)
++	})
++
++	t.Run("repeated calls unregister with the capability once", func(t *testing.T) {
++		t.Parallel()
++		f := newCoordinatorFixture(t)
++		trigger, _ := f.expectTrigger(t)
++		// require that UnregisterTrigger on the trigger capability is called exactly once
++		trigger.EXPECT().UnregisterTrigger(mock.Anything, mock.Anything).Return(nil).Once()
++
++		_, err := f.c.RegisterTriggers(t.Context(), newTestSubscriber(), testParams(t))
++		require.NoError(t, err)
++		require.NoError(t, f.c.UnregisterTriggers(t.Context(), validWorkflowID))
++		// The second call may land before or after the release; both are fine.
++		err = f.c.UnregisterTriggers(t.Context(), validWorkflowID)
++		if err != nil {
++			require.ErrorIs(t, err, ErrWorkflowNotCoordinated)
++		}
++		require.Eventually(t, func() bool { return f.limits.inUse() == 0 }, 5*time.Second, 10*time.Millisecond)
++		assert.Equal(t, 1, f.limits.freeCount())
++	})
++
++	t.Run("a failed unregistration does not prevent a subsequent successful unregistration", func(t *testing.T) {
++		t.Parallel()
++		f := newCoordinatorFixture(t)
++		trigger, eventCh := f.expectTrigger(t)
++		trigger.EXPECT().UnregisterTrigger(mock.Anything, mock.Anything).Return(errors.New("capability down")).Once()
++		trigger.EXPECT().UnregisterTrigger(mock.Anything, mock.Anything).Return(nil).Once()
++		// Keep a reader busy so the retry happens before the release.
++		started, release := f.blockingExecution()
++
++		_, err := f.c.RegisterTriggers(t.Context(), newTestSubscriber(), testParams(t))
++		require.NoError(t, err)
++		eventCh <- triggerEvent("evt-1")
++		<-started
++
++		require.ErrorContains(t, f.c.UnregisterTriggers(t.Context(), validWorkflowID), "failed to unregister 1 of 1 triggers")
++		require.NoError(t, f.c.UnregisterTriggers(t.Context(), validWorkflowID))
++
++		close(release)
++		require.Eventually(t, func() bool { return f.limits.inUse() == 0 }, 5*time.Second, 10*time.Millisecond)
++		assert.Equal(t, 1, f.limits.freeCount(), "only one release waiter may free the slot")
++	})
++
++	t.Run("releases after the drain timeout even if an execution hangs", func(t *testing.T) {
++		t.Parallel()
++		f := newCoordinatorFixture(t)
++		trigger, eventCh := f.expectTrigger(t)
++		trigger.EXPECT().UnregisterTrigger(mock.Anything, mock.Anything).Return(nil).Once()
++		started, release := f.blockingExecution()
++		defer close(release)
++
++		_, err := f.c.RegisterTriggers(t.Context(), newTestSubscriber(), testParams(t))
++		require.NoError(t, err)
++		eventCh <- triggerEvent("evt-1")
++		<-started
++
++		require.NoError(t, f.c.UnregisterTriggers(t.Context(), validWorkflowID))
++		require.NoError(t, f.clock.BlockUntilContext(t.Context(), 1))
++		assert.True(t, f.registered())
++
++		f.clock.Advance(defaultDrainTimeout)
++		require.Eventually(t, func() bool { return !f.registered() && f.limits.inUse() == 0 }, 5*time.Second, 10*time.Millisecond)
++	})
++}
++
++// TestCoordinator_ReRegisterWhileDraining covers the overlap of two registrations
++// for the same workflow: the old registration drains while the new one is active.
++//
++// The test registers, starts an execution that blocks, and unregisters. It then
++// registers again before the old registration drains. The new registration must
++// replace the old state, and the old release waiter must not delete the new state
++// or free the new slot when the old readers exit. The new registration must still
++// ACK against its own handles.
++func TestCoordinator_ReRegisterWhileDraining(t *testing.T) {
++	t.Parallel()
++	f := newCoordinatorFixture(t)
++
++	oldTrigger, oldCh := f.expectTrigger(t)
++	oldTrigger.EXPECT().UnregisterTrigger(mock.Anything, mock.Anything).Return(nil).Once()
++	started, release := f.blockingExecution()
++
++	_, err := f.c.RegisterTriggers(t.Context(), newTestSubscriber(), testParams(t))
++	require.NoError(t, err)
++	oldCh <- triggerEvent("evt-1")
++	<-started
++	require.NoError(t, f.c.UnregisterTriggers(t.Context(), validWorkflowID))
++
++	oldWT, _ := f.c.workflows.get(validWorkflowID)
++
++	// The replacement engine registers while the old registration is still draining.
++	f.engine.execute = nil
++	newTrigger, _ := f.expectTrigger(t)
++	newTrigger.EXPECT().UnregisterTrigger(mock.Anything, mock.Anything).Return(nil).Maybe()
++	_, err = f.c.RegisterTriggers(t.Context(), newTestSubscriber(), testParams(t))
++	require.NoError(t, err)
++
++	newWT, _ := f.c.workflows.get(validWorkflowID)
++	require.NotSame(t, oldWT, newWT, "registering again must replace, not reuse, the old state")
++	assert.Equal(t, 2, f.limits.inUse(), "the old slot is held until its drain completes")
++
++	close(release)
++	oldWT.readers.Wait() // the old registration's own readers have now exited
++
++	// The old release waiter, woken by the same Wait(), may still run and
++	// (wrongly, if buggy) drop the new registration. Poll instead of a single
++	// sleep-then-check: this fails the instant the bug appears rather than
++	// only if it happens to land inside a guessed window.
++	require.Never(t, func() bool {
++		cw, _ := f.c.workflows.get(validWorkflowID)
++		return cw != newWT
++	}, 100*time.Millisecond, 2*time.Millisecond, "the old waiter must not drop the new registration")
++	require.Eventually(t, func() bool { return f.limits.inUse() == 1 }, time.Second, time.Millisecond,
++		"the old waiter must still free its own slot")
++
++	regID := RegistrationID(validWorkflowID, 0)
++	newTrigger.EXPECT().AckEvent(mock.Anything, regID, "evt-2", testMethod).Return(nil).Once()
++	require.NoError(t, f.c.Ack(t.Context(), testTriggerCapID, regID, "evt-2"))
++}
++
++// TestCoordinator_CloseUnregistersRemainingWorkflows covers shutdown: Close
++// unregisters the triggers that remain registered when the coordinator stops.
++func TestCoordinator_CloseUnregistersRemainingWorkflows(t *testing.T) {
++	t.Parallel()
++	capReg := regmocks.NewCapabilitiesRegistry(t)
++	engines := newFakeEngineRegistry()
++	wid, err := types.WorkflowIDFromHex(validWorkflowID)
++	require.NoError(t, err)
++	engines.set(wid, &fakeEngine{coordinated: true})
++
++	c := NewCoordinator(newRegisterDeps(t, capReg, limits.NewGateLimiter(true)), engines, &fakeWorkflowLimits{}, clockwork.NewFakeClock())
++	require.NoError(t, c.Start(t.Context()))
++
++	trigger := capmocks.NewTriggerCapability(t)
++	trigger.EXPECT().RegisterTrigger(mock.Anything, mock.Anything).
++		Return((<-chan capabilities.TriggerResponse)(make(chan capabilities.TriggerResponse)), nil).Once()
++
++	// The assertion: Close must unregister the remaining registration with the
++	// capability, or this Once() expectation fails the test.
++	trigger.EXPECT().UnregisterTrigger(mock.Anything, mock.MatchedBy(func(req capabilities.TriggerRegistrationRequest) bool {
++		return req.TriggerID == RegistrationID(validWorkflowID, 0) && req.Method == testMethod
++	})).Return(nil).Once()
++	capReg.EXPECT().GetTrigger(mock.Anything, testTriggerCapID).Return(trigger, nil).Once()
++
++	_, err = c.RegisterTriggers(t.Context(), newTestSubscriber(), testParams(t))
++	require.NoError(t, err)
++	require.NoError(t, c.Close())
++}
+diff --git a/core/services/workflows/v2/triggers/triggers.go b/core/services/workflows/v2/triggers/triggers.go
+index 6ee62bc39c6..65aa6eddd2f 100644
+--- a/core/services/workflows/v2/triggers/triggers.go
++++ b/core/services/workflows/v2/triggers/triggers.go
+@@ -145,6 +145,11 @@ func ReadLoop(
+ 			if !isOpen {
+ 				return
+ 			}
++			// The select races a queued event against cancellation: without this
++			// check, an event received after cancel would still be delivered.
++			if ctx.Err() != nil {
++				return
++			}
+ 			eventID := event.Event.ID
+ 			metrics.With(platform.KeyTriggerID, triggerCapID).IncrementTriggerEventReceivedCounter(ctx)
+ 			lggr.Debugw("Processing trigger event", "triggerID", triggerCapID, "eventID", eventID)
+diff --git a/system-tests/tests/smoke/cre/coordinated_engine_test.go b/system-tests/tests/smoke/cre/coordinated_engine_test.go
+new file mode 100644
+index 00000000000..6bdd7ea991b
+--- /dev/null
++++ b/system-tests/tests/smoke/cre/coordinated_engine_test.go
+@@ -0,0 +1,333 @@
++package cre
++
++import (
++	"context"
++	"encoding/hex"
++	"slices"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/ethereum/go-ethereum/common"
++	"github.com/stretchr/testify/require"
++
++	workflow_registry_wrapper_v2 "github.com/smartcontractkit/chainlink-evm/gethwrappers/workflow/generated/workflow_registry_wrapper_v2"
++	commonevents "github.com/smartcontractkit/chainlink-protos/workflows/go/common"
++	workflowevents "github.com/smartcontractkit/chainlink-protos/workflows/go/events"
++	"github.com/smartcontractkit/chainlink-testing-framework/framework"
++	crontypes "github.com/smartcontractkit/chainlink/core/scripts/cre/environment/examples/workflows/cron/types"
++	keystone_changeset "github.com/smartcontractkit/chainlink/deployment/keystone/changeset"
++	crecontracts "github.com/smartcontractkit/chainlink/system-tests/lib/cre/contracts"
++	"github.com/smartcontractkit/chainlink/system-tests/lib/cre/environment/blockchains/evm"
++	t_helpers "github.com/smartcontractkit/chainlink/system-tests/tests/test-helpers"
++	ttypes "github.com/smartcontractkit/chainlink/system-tests/tests/test-helpers/configuration"
++)
++
++// coordinatedEngineDON is the workflow DON of the default topology
++// (configs/workflow-gateway-capabilities-don.toml).
++const coordinatedEngineDON = "workflow"
++
++// Test_CRE_V2_CoordinatedEngine runs a cron workflow with CoordinatedEngineEnabled
++// on, so its triggers are registered, delivered and ACKed by the node's trigger
++// coordinator instead of by the engine itself.
++//
++// The flag is read once at engine creation, so it is applied before deploying.
++// It is a global override on the shared environment, hence serial.
++//
++//	go test ./system-tests/tests/smoke/cre -run '^Test_CRE_V2_CoordinatedEngine$' -timeout 20m -v
++//
++//nolint:paralleltest // mutates settings on the shared environment; must run serially
++func Test_CRE_V2_CoordinatedEngine(t *testing.T) {
++	testLogger := framework.L
++	testEnv := t_helpers.SetupTestEnvironmentWithPerTestKeys(t, t_helpers.GetDefaultTestConfig(t))
++
++	t_helpers.ApplyCRESettings(t, testEnv, t_helpers.Global(`CoordinatedEngineEnabled = 'true'`))
++
++	userLogsCh := make(chan *workflowevents.UserLogs, 1000)
++	baseMessageCh := make(chan *commonevents.BaseMessage, 1000)
++	server := t_helpers.StartChipTestSink(t, t_helpers.GetPublishFn(testLogger, userLogsCh, baseMessageCh))
++	t.Cleanup(func() {
++		// t.Context() is already cancelled when cleanups run.
++		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++		defer cancel()
++		t_helpers.ShutdownChipSinkWithDrain(ctx, server, userLogsCh, baseMessageCh)
++	})
++
++	workflowFileLocation := "../../../../core/scripts/cre/environment/examples/workflows/cron/main.go"
++	workflowName := t_helpers.UniqueWorkflowName(testEnv, "coordinatedcron")
++	workflowConfig := crontypes.WorkflowConfig{Schedule: "*/30 * * * * *"}
++	workflowID := t_helpers.CompileAndDeployWorkflow(t, testEnv, testLogger, workflowName, &workflowConfig, workflowFileLocation)
++
++	t_helpers.WatchWorkflowLogs(t, testLogger, userLogsCh, baseMessageCh, t_helpers.WorkflowEngineInitErrorLog,
++		"Amazing workflow user log", 2*time.Minute, t_helpers.WithUserLogWorkflowID(workflowID))
++
++	// The execution alone would also pass on the legacy engine; these prove it ran on the coordinated path.
++	// Both log lines carry workflowID=<hex>, so the needles attribute them to this workflow.
++	t_helpers.RequireContainerLogsForNodesetEventually(t, testEnv, coordinatedEngineDON,
++		"Routing workflow to the coordinated engine", time.Minute, 5*time.Second)
++	requireCoordinatorLogForWorkflow(t, testEnv, workflowID)
++}
++
++// Test_CRE_V2_CoordinatedEngine_MixedModeDeploy starts a workflow on the legacy
++// engine (flag off), then enables CoordinatedEngineEnabled and deploys a second
++// workflow. Both must keep executing: the first on its legacy engine, the second
++// through the trigger coordinator.
++//
++//	go test ./system-tests/tests/smoke/cre -run '^Test_CRE_V2_CoordinatedEngine_MixedModeDeploy$' -timeout 20m -v
++//
++//nolint:paralleltest // mutates settings on the shared environment; must run serially
++func Test_CRE_V2_CoordinatedEngine_MixedModeDeploy(t *testing.T) {
++	testLogger := framework.L
++	testEnv := t_helpers.SetupTestEnvironmentWithPerTestKeys(t, t_helpers.GetDefaultTestConfig(t))
++
++	userLogsCh := make(chan *workflowevents.UserLogs, 1000)
++	baseMessageCh := make(chan *commonevents.BaseMessage, 1000)
++	server := t_helpers.StartChipTestSink(t, t_helpers.GetPublishFn(testLogger, userLogsCh, baseMessageCh))
++	t.Cleanup(func() {
++		// t.Context() is already cancelled when cleanups run.
++		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++		defer cancel()
++		t_helpers.ShutdownChipSinkWithDrain(ctx, server, userLogsCh, baseMessageCh)
++	})
++
++	workflowFileLocation := "../../../../core/scripts/cre/environment/examples/workflows/cron/main.go"
++	workflowConfig := crontypes.WorkflowConfig{Schedule: "*/30 * * * * *"}
++
++	// Flag off: the first workflow registers and runs on the legacy engine.
++	legacyName := t_helpers.UniqueWorkflowName(testEnv, "legacycron")
++	legacyID := t_helpers.CompileAndDeployWorkflow(t, testEnv, testLogger, legacyName, &workflowConfig, workflowFileLocation)
++	t_helpers.WatchWorkflowLogs(t, testLogger, userLogsCh, baseMessageCh, t_helpers.WorkflowEngineInitErrorLog,
++		"Amazing workflow user log", 2*time.Minute, t_helpers.WithUserLogWorkflowID(legacyID))
++
++	// Flag on: only engines created from now on are coordinated.
++	t_helpers.ApplyCRESettings(t, testEnv, t_helpers.Global(`CoordinatedEngineEnabled = 'true'`))
++
++	coordinatedName := t_helpers.UniqueWorkflowName(testEnv, "coordinatedcron")
++	coordinatedID := t_helpers.CompileAndDeployWorkflow(t, testEnv, testLogger, coordinatedName, &workflowConfig, workflowFileLocation)
++	t_helpers.WatchWorkflowLogs(t, testLogger, userLogsCh, baseMessageCh, t_helpers.WorkflowEngineInitErrorLog,
++		"Amazing workflow user log", 2*time.Minute, t_helpers.WithUserLogWorkflowID(coordinatedID))
++
++	// The legacy workflow must still be executing after the flag flip and the second deploy.
++	t_helpers.WatchWorkflowLogs(t, testLogger, userLogsCh, baseMessageCh, t_helpers.WorkflowEngineInitErrorLog,
++		"Amazing workflow user log", 2*time.Minute, t_helpers.WithUserLogWorkflowID(legacyID))
++
++	// The coordinator registration log must be attributable to the second workflow only.
++	requireCoordinatorLogForWorkflow(t, testEnv, coordinatedID)
++	require.Empty(t, coordinatorLogLinesForWorkflow(t, testEnv, legacyID),
++		"legacy workflow must not have registered triggers via the coordinator")
++}
++
++// Test_CRE_V2_CoordinatedEngine_MixedModeReRegister starts a workflow on the
++// legacy engine (flag off), enables CoordinatedEngineEnabled, then pauses and
++// re-activates the legacy workflow on the registry. The syncer tears it down and
++// re-registers it, and the new engine is created with the flag on — so both
++// workflows end up coordinated.
++//
++//	go test ./system-tests/tests/smoke/cre -run '^Test_CRE_V2_CoordinatedEngine_MixedModeReRegister$' -timeout 20m -v
++//
++//nolint:paralleltest // mutates settings on the shared environment; must run serially
++func Test_CRE_V2_CoordinatedEngine_MixedModeReRegister(t *testing.T) {
++	testLogger := framework.L
++	testEnv := t_helpers.SetupTestEnvironmentWithPerTestKeys(t, t_helpers.GetDefaultTestConfig(t))
++
++	userLogsCh := make(chan *workflowevents.UserLogs, 1000)
++	baseMessageCh := make(chan *commonevents.BaseMessage, 1000)
++	server := t_helpers.StartChipTestSink(t, t_helpers.GetPublishFn(testLogger, userLogsCh, baseMessageCh))
++	t.Cleanup(func() {
++		// t.Context() is already cancelled when cleanups run.
++		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++		defer cancel()
++		t_helpers.ShutdownChipSinkWithDrain(ctx, server, userLogsCh, baseMessageCh)
++	})
++
++	workflowFileLocation := "../../../../core/scripts/cre/environment/examples/workflows/cron/main.go"
++	workflowConfig := crontypes.WorkflowConfig{Schedule: "*/30 * * * * *"}
++
++	// Flag off: the first workflow registers and runs on the legacy engine.
++	legacyName := t_helpers.UniqueWorkflowName(testEnv, "legacycron")
++	legacyID := t_helpers.CompileAndDeployWorkflow(t, testEnv, testLogger, legacyName, &workflowConfig, workflowFileLocation)
++	t_helpers.WatchWorkflowLogs(t, testLogger, userLogsCh, baseMessageCh, t_helpers.WorkflowEngineInitErrorLog,
++		"Amazing workflow user log", 2*time.Minute, t_helpers.WithUserLogWorkflowID(legacyID))
++
++	// Flag on before the pause/activate so the re-registered engine is coordinated.
++	t_helpers.ApplyCRESettings(t, testEnv, t_helpers.Global(`CoordinatedEngineEnabled = 'true'`))
++
++	coordinatedName := t_helpers.UniqueWorkflowName(testEnv, "coordinatedcron")
++	coordinatedID := t_helpers.CompileAndDeployWorkflow(t, testEnv, testLogger, coordinatedName, &workflowConfig, workflowFileLocation)
++	t_helpers.WatchWorkflowLogs(t, testLogger, userLogsCh, baseMessageCh, t_helpers.WorkflowEngineInitErrorLog,
++		"Amazing workflow user log", 2*time.Minute, t_helpers.WithUserLogWorkflowID(coordinatedID))
++
++	// The engine reads the flag once at creation, so the legacy workflow must be
++	// recreated to migrate: pause removes its engine, activate builds a new one
++	// with the flag on. The wait matters because a pause with an in-flight
++	// execution is deferred, and an activate processed while the old engine is
++	// still registered takes the happy path (engine exists, ready, active) and
++	// returns without recreating it — the legacy engine would keep running until
++	// a later reconcile tick happens to rebuild it.
++	pauseWorkflow(t, testEnv, legacyID)
++	waitForEngineTeardown(t, testEnv, legacyID)
++	activateWorkflow(t, testEnv, legacyID)
++
++	// Both workflows must execute after the re-registration.
++	t_helpers.WatchWorkflowLogs(t, testLogger, userLogsCh, baseMessageCh, t_helpers.WorkflowEngineInitErrorLog,
++		"Amazing workflow user log", 2*time.Minute, t_helpers.WithUserLogWorkflowID(legacyID))
++	t_helpers.WatchWorkflowLogs(t, testLogger, userLogsCh, baseMessageCh, t_helpers.WorkflowEngineInitErrorLog,
++		"Amazing workflow user log", 2*time.Minute, t_helpers.WithUserLogWorkflowID(coordinatedID))
++
++	// The re-registered legacy workflow must have gone through the coordinator too:
++	// its registration log is distinct from the second workflow's earlier one.
++	requireCoordinatorLogForWorkflow(t, testEnv, legacyID)
++	requireCoordinatorLogForWorkflow(t, testEnv, coordinatedID)
++}
++
++// Test_CRE_V2_CoordinatedEngine_RollbackToLegacy starts a workflow with
++// CoordinatedEngineEnabled on, then disables the flag and pauses/re-activates the
++// workflow. The syncer tears down the coordinated engine and re-registers it, and
++// the new engine is created with the flag off — the workflow ends up on the legacy
++// engine.
++//
++// This is the rollback path. The flag is read once at engine creation, so a flip
++// alone does not migrate running workflows: ops must also pause/activate each
++// workflow (as here) or restart the nodes, which rebuild every engine from the
++// registry state with the flag read fresh.
++//
++//	go test ./system-tests/tests/smoke/cre -run '^Test_CRE_V2_CoordinatedEngine_RollbackToLegacy$' -timeout 20m -v
++//
++//nolint:paralleltest // mutates settings on the shared environment; must run serially
++func Test_CRE_V2_CoordinatedEngine_RollbackToLegacy(t *testing.T) {
++	testLogger := framework.L
++	testEnv := t_helpers.SetupTestEnvironmentWithPerTestKeys(t, t_helpers.GetDefaultTestConfig(t))
++
++	// Flag on: the workflow registers and runs through the trigger coordinator.
++	settings := t_helpers.ApplyCRESettings(t, testEnv, t_helpers.Global(`CoordinatedEngineEnabled = 'true'`))
++
++	userLogsCh := make(chan *workflowevents.UserLogs, 1000)
++	baseMessageCh := make(chan *commonevents.BaseMessage, 1000)
++	server := t_helpers.StartChipTestSink(t, t_helpers.GetPublishFn(testLogger, userLogsCh, baseMessageCh))
++	t.Cleanup(func() {
++		// t.Context() is already cancelled when cleanups run.
++		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
++		defer cancel()
++		t_helpers.ShutdownChipSinkWithDrain(ctx, server, userLogsCh, baseMessageCh)
++	})
++
++	workflowFileLocation := "../../../../core/scripts/cre/environment/examples/workflows/cron/main.go"
++	workflowName := t_helpers.UniqueWorkflowName(testEnv, "coordinatedcron")
++	workflowConfig := crontypes.WorkflowConfig{Schedule: "*/30 * * * * *"}
++	workflowID := t_helpers.CompileAndDeployWorkflow(t, testEnv, testLogger, workflowName, &workflowConfig, workflowFileLocation)
++
++	t_helpers.WatchWorkflowLogs(t, testLogger, userLogsCh, baseMessageCh, t_helpers.WorkflowEngineInitErrorLog,
++		"Amazing workflow user log", 2*time.Minute, t_helpers.WithUserLogWorkflowID(workflowID))
++	requireCoordinatorLogForWorkflow(t, testEnv, workflowID)
++	registrationsBefore := countCoordinatorLogLinesForWorkflow(t, testEnv, workflowID)
++
++	// Flag off: engines created from now on are legacy. The baseline has the flag
++	// off, so resetting the override disables it — a second ApplyCRESettings call
++	// would fail: only one override may be active per test.
++	settings.Reset(t)
++
++	// Recreate the engine so it picks up the disabled flag: pause removes it,
++	// activate builds a new one. The wait matters because a pause with an
++	// in-flight execution is deferred, and an activate processed while the old
++	// engine is still registered takes the happy path and returns without
++	// recreating it.
++	pauseWorkflow(t, testEnv, workflowID)
++	waitForEngineTeardown(t, testEnv, workflowID)
++	activateWorkflow(t, testEnv, workflowID)
++
++	// The workflow must keep executing on the legacy engine.
++	t_helpers.WatchWorkflowLogs(t, testLogger, userLogsCh, baseMessageCh, t_helpers.WorkflowEngineInitErrorLog,
++		"Amazing workflow user log", 2*time.Minute, t_helpers.WithUserLogWorkflowID(workflowID))
++
++	// No new coordinator registration may appear for the re-created engine:
++	// the line count must be unchanged since before the pause.
++	require.Equal(t, registrationsBefore, countCoordinatorLogLinesForWorkflow(t, testEnv, workflowID),
++		"the re-created engine must not register triggers via the coordinator")
++}
++
++// coordinatorLogMessage is the syncer log line emitted once a workflow's triggers
++// are registered through the coordinator.
++const coordinatorLogMessage = "Registered triggers via coordinator"
++
++// coordinatorLogLinesForWorkflow filters the coordinator registration lines down to one
++// workflow. The message and the workflow ID are matched in two passes, so fields injected
++// between them (e.g. the node logger's version field) do not break the match. workflowID
++// is lowercase hex with no 0x — the format CompileAndDeployWorkflow returns.
++func coordinatorLogLinesForWorkflow(t *testing.T, testEnv *ttypes.TestEnvironment, workflowID string) []string {
++	t.Helper()
++	lines := t_helpers.ContainerLogLinesForNodeset(t, testEnv, coordinatedEngineDON, coordinatorLogMessage)
++	return slices.DeleteFunc(lines, func(line string) bool { return !strings.Contains(line, workflowID) })
++}
++
++// requireCoordinatorLogForWorkflow waits for the coordinator registration log of
++// workflowID to appear on the workflow DON.
++func requireCoordinatorLogForWorkflow(t *testing.T, testEnv *ttypes.TestEnvironment, workflowID string) {
++	t.Helper()
++	require.Eventually(t, func() bool {
++		return len(coordinatorLogLinesForWorkflow(t, testEnv, workflowID)) > 0
++	}, time.Minute, 5*time.Second, "expected a %q line for workflow %s", coordinatorLogMessage, workflowID)
++}
++
++// countCoordinatorLogLinesForWorkflow counts the coordinator registration lines of
++// workflowID across the workflow DON: one per node per registration through the
++// coordinator. Note the count is per-node — 4 nodes each log one line per
++// registration, so a single registration yields 4 lines.
++func countCoordinatorLogLinesForWorkflow(t *testing.T, testEnv *ttypes.TestEnvironment, workflowID string) int {
++	t.Helper()
++	return len(coordinatorLogLinesForWorkflow(t, testEnv, workflowID))
++}
++
++// workflowRegistry binds the WorkflowRegistry contract for the test chain.
++func workflowRegistry(t *testing.T, testEnv *ttypes.TestEnvironment) *workflow_registry_wrapper_v2.WorkflowRegistry {
++	t.Helper()
++
++	sc := testEnv.CreEnvironment.Blockchains[0].(*evm.Blockchain).SethClient
++	registryAddr := crecontracts.MustGetAddressFromDataStore(testEnv.CreEnvironment.CldfEnvironment.DataStore,
++		testEnv.CreEnvironment.Blockchains[0].ChainSelector(), keystone_changeset.WorkflowRegistry.String(),
++		testEnv.CreEnvironment.ContractVersions[keystone_changeset.WorkflowRegistry.String()], "")
++	registry, err := workflow_registry_wrapper_v2.NewWorkflowRegistry(common.HexToAddress(registryAddr), sc.Client)
++	require.NoError(t, err, "failed to bind WorkflowRegistry contract")
++	return registry
++}
++
++// workflowIDBytes decodes a hex workflow ID (the format CompileAndDeployWorkflow returns)
++// into the [32]byte the registry contract expects.
++func workflowIDBytes(t *testing.T, workflowID string) [32]byte {
++	t.Helper()
++
++	idBytes, err := hex.DecodeString(strings.TrimPrefix(workflowID, "0x"))
++	require.NoError(t, err, "workflow ID is not valid hex")
++	require.Len(t, idBytes, 32, "workflow ID must be 32 bytes")
++	return [32]byte(idBytes)
++}
++
++// pauseWorkflow pauses a workflow on the WorkflowRegistry.
++func pauseWorkflow(t *testing.T, testEnv *ttypes.TestEnvironment, workflowID string) {
++	t.Helper()
++
++	sc := testEnv.CreEnvironment.Blockchains[0].(*evm.Blockchain).SethClient
++	_, err := sc.Decode(workflowRegistry(t, testEnv).PauseWorkflow(sc.NewTXOpts(), workflowIDBytes(t, workflowID)))
++	require.NoError(t, err, "failed to pause workflow")
++}
++
++// activateWorkflow re-activates a paused workflow on the WorkflowRegistry.
++func activateWorkflow(t *testing.T, testEnv *ttypes.TestEnvironment, workflowID string) {
++	t.Helper()
++
++	sc := testEnv.CreEnvironment.Blockchains[0].(*evm.Blockchain).SethClient
++	_, err := sc.Decode(workflowRegistry(t, testEnv).ActivateWorkflow(sc.NewTXOpts(), workflowIDBytes(t, workflowID), testEnv.Dons.MustWorkflowDON().DonFamily()))
++	require.NoError(t, err, "failed to activate workflow")
++}
++
++// waitForEngineTeardown waits until the pause has been fully processed on every
++// workflow node: the syncer logs "handled event (WorkflowPaused)" only after the
++// engine is drained, closed and popped. One line per node must appear.
++func waitForEngineTeardown(t *testing.T, testEnv *ttypes.TestEnvironment, workflowID string) {
++	t.Helper()
++
++	require.Eventually(t, func() bool {
++		lines := t_helpers.ContainerLogLinesForNodeset(t, testEnv, coordinatedEngineDON, "handled event (WorkflowPaused)")
++		lines = slices.DeleteFunc(lines, func(line string) bool { return !strings.Contains(line, workflowID) })
++		return len(lines) >= len(testEnv.Dons.MustWorkflowDON().Nodes) // one per workflow node
++	}, 2*time.Minute, 5*time.Second, "workflow %s was not torn down on all workflow nodes", workflowID)
++}
+diff --git a/system-tests/tests/test-helpers/container_logs.go b/system-tests/tests/test-helpers/container_logs.go
+index 5cb48b98568..67c672973b3 100644
+--- a/system-tests/tests/test-helpers/container_logs.go
++++ b/system-tests/tests/test-helpers/container_logs.go
+@@ -63,9 +63,10 @@ func nodesetContainerNames(t *testing.T, testEnv *ttypes.TestEnvironment, nodese
+ 	return names
+ }
+ 
+-// containerLogsContain reports whether needle appears in the logs of any of containerNames,
+-// as they stand at the moment of the call.
+-func containerLogsContain(t *testing.T, containerNames []string, needle string) bool {
++// containerLogLines returns every log line containing needle from the current logs
++// of containerNames. It is the shared scanning core: the needle assertions check for
++// a non-empty result, and callers that need the lines themselves filter them further.
++func containerLogLines(t *testing.T, containerNames []string, needle string) []string {
+ 	t.Helper()
+ 
+ 	targetNames := make(map[string]struct{}, len(containerNames))
+@@ -79,7 +80,7 @@ func containerLogsContain(t *testing.T, containerNames []string, needle string)
+ 	)
+ 	require.NoError(t, err)
+ 
+-	found := false
++	var matches []string
+ 	for containerName, reader := range logStreams {
+ 		if _, ok := targetNames[containerName]; !ok {
+ 			_ = reader.Close()
+@@ -90,12 +91,22 @@ func containerLogsContain(t *testing.T, containerNames []string, needle string)
+ 			framework.L.Warn().Str("container", containerName).Err(readErr).Msg("could not read container logs")
+ 			continue
+ 		}
+-		if strings.Contains(content, needle) {
+-			found = true
+-			framework.L.Info().Str("container", containerName).Str("needle", needle).Msg("container log match")
++		for line := range strings.Lines(content) {
++			if strings.Contains(line, needle) {
++				matches = append(matches, line)
++				framework.L.Info().Str("container", containerName).Str("needle", needle).Msg("container log match")
++			}
+ 		}
+ 	}
+-	return found
++	return matches
++}
++
++// containerLogsContain reports whether needle appears in the logs of any of containerNames,
++// as they stand at the moment of the call.
++func containerLogsContain(t *testing.T, containerNames []string, needle string) bool {
++	t.Helper()
++
++	return len(containerLogLines(t, containerNames, needle)) > 0
+ }
+ 
+ // assertContainerLogs scans stdout/stderr of containerNames and checks whether needle appears.
+@@ -110,6 +121,16 @@ func assertContainerLogs(t *testing.T, containerNames []string, needle string, w
+ 	assert.False(t, found, "expected none of %v to contain %q", containerNames, needle)
+ }
+ 
++// ContainerLogLinesForNodeset returns every log line containing needle from the
++// current logs of the nodeset's containers. Unlike the needle assertions, it returns
++// the lines so callers can filter further (e.g. by a workflow ID whose position in the
++// line is not stable).
++func ContainerLogLinesForNodeset(t *testing.T, testEnv *ttypes.TestEnvironment, nodesetName, needle string) []string {
++	t.Helper()
++
++	return containerLogLines(t, nodesetContainerNames(t, testEnv, nodesetName), needle)
++}
++
+ // AssertNodeLogs requires needle to appear in at least one Chainlink node container log.
+ func AssertNodeLogs(t *testing.T, testEnv *ttypes.TestEnvironment, needle string) {
+ 	t.Helper()
