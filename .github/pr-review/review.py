@@ -229,6 +229,14 @@ def _clip(value: Any, limit: int) -> str:
     return str(value if value is not None else "").strip()[:limit]
 
 
+def _first(item: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = item.get(key)
+        if value:
+            return value
+    return ""
+
+
 def normalize_output(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     findings: List[Dict[str, Any]] = []
     general: List[Dict[str, Any]] = []
@@ -243,12 +251,16 @@ def normalize_output(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
             continue
         severity = _clip(item.get("severity"), 20).lower()
         body = _clip(item.get("body"), 1500)
-        standard = _clip(item.get("standard"), 1000)
-        fix = _clip(item.get("fix"), 1000)
+        standard = _clip(
+            _first(item, "standard", "raw_standard", "standard_quote"), 1000
+        )
+        fix = _clip(_first(item, "fix", "recommended_action", "action"), 1000)
         if not path or line < 1 or severity not in SEVERITY_ORDER:
             continue
-        if not body or not standard or not fix:
+        if not body or not standard:
             continue
+        if not fix:
+            fix = "Address the issue described in the finding."
         finding = {
             "path": path,
             "line": line,
@@ -265,7 +277,10 @@ def normalize_output(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
             finding["title"] = title
         suggestion = item.get("suggestion")
         if isinstance(suggestion, str) and suggestion.strip():
-            finding["suggestion"] = suggestion.strip()[:4000]
+            suggestion = suggestion.strip()
+            # A GitHub suggestion block is a code replacement, not prose.
+            if "\n" in suggestion or any(ch in suggestion for ch in "{}();=:[]"):
+                finding["suggestion"] = suggestion[:4000]
         findings.append(finding)
 
     for item in raw.get("general") or []:
@@ -274,11 +289,15 @@ def normalize_output(raw: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
         location = _clip(item.get("location"), 500)
         severity = _clip(item.get("severity"), 20).lower()
         body = _clip(item.get("body"), 1500)
-        standard = _clip(item.get("standard"), 1000)
-        fix = _clip(item.get("fix"), 1000)
-        if not LOCATION_RE.match(location) or severity not in SEVERITY_ORDER:
+        standard = _clip(
+            _first(item, "standard", "raw_standard", "standard_quote"), 1000
+        )
+        fix = _clip(_first(item, "fix", "recommended_action", "action"), 1000)
+        if not LOCATION_RE.match(location):
             continue
-        if not body or not standard or not fix:
+        if severity not in SEVERITY_ORDER:
+            severity = "medium"
+        if not body:
             continue
         entry = {
             "location": location,
@@ -302,8 +321,10 @@ def format_comment(finding: Dict[str, Any]) -> str:
     if title:
         head += f" - {title.strip().rstrip('.')}"
     parts = [head, finding["body"].strip()]
-    parts.append(f'**Standard:** "{finding["standard"].strip()}"')
-    parts.append(f'**Fix:** {finding["fix"].strip()}')
+    if finding.get("standard"):
+        parts.append(f'**Standard:** "{finding["standard"].strip()}"')
+    if finding.get("fix"):
+        parts.append(f'**Fix:** {finding["fix"].strip()}')
     suggestion = finding.get("suggestion")
     if suggestion:
         parts.append(f"```suggestion\n{suggestion.strip()}\n```")
@@ -314,9 +335,15 @@ def format_comment(finding: Dict[str, Any]) -> str:
 def format_general(entry: Dict[str, Any]) -> str:
     severity = SEVERITY_LABEL.get(entry["severity"], entry["severity"].title())
     title = f" - {entry['title'].strip().rstrip('.')}" if entry.get("title") else ""
+    extra = []
+    if entry.get("standard"):
+        extra.append(f'Standard: "{entry["standard"].strip()}"')
+    if entry.get("fix"):
+        extra.append(f"Fix: {entry['fix'].strip()}")
+    suffix = f" ({'; '.join(extra)})" if extra else ""
     return (
-        f"- `{entry['location']}` - **{severity}**{title}. {entry['body'].strip()} "
-        f'(Standard: "{entry["standard"].strip()}"; Fix: {entry["fix"].strip()})'
+        f"- `{entry['location']}` - **{severity}**{title}. "
+        f"{entry['body'].strip()}{suffix}"
     )
 
 

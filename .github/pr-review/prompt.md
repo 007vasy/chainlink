@@ -25,14 +25,17 @@ unrelated code.
 
 ## Rules
 
-- Report only defects introduced or exposed by this PR.
+- Report only defects introduced or exposed by this PR, including a design or
+  test gap that leaves a specific failure mode unguarded.
 - Apply the standards in their priority order: correctness, concurrency,
   lifecycle, errors, security, performance, tests, design.
 - Skip everything the standards list under **Owned by CI**: formatting,
   imports, naming style, comment wording, lint-enforced items, testify
   assertion choice, deprecated APIs.
-- Every finding must name a concrete failure scenario: the input or state that
-  produces a wrong outcome. No failure scenario, no finding.
+- Every finding must explain the concrete impact: the input or state that
+  produces a wrong outcome, or the future breakage that the design or test gap
+  leaves unguarded. No impact, no finding. Do not report a pure style
+  preference.
 - Anchor the finding on a changed line in the diff. `path` must name a file in
   the diff. `line` must be a line that appears in the diff (an added line or a
   context line). Use `side: "RIGHT"` for the new file and `"LEFT"` for a
@@ -47,7 +50,8 @@ unrelated code.
 - `standard` must be a verbatim quote from the standards file.
 - `fix` must be one concrete action.
 - Optional `suggestion`: the exact replacement code for the anchored line(s),
-  without code fences. Only use it for a small, safe replacement.
+  without code fences. Only use it for a small, safe replacement. If you do
+  not have exact replacement code, omit `suggestion`; do not put prose in it.
 
 ## Output
 
