@@ -22,6 +22,10 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 OUT="${OUT:-coverage-patch}"
+case "$OUT" in
+  /*) ;;
+  *) OUT="$REPO_ROOT/$OUT" ;;
+esac
 SHORT="${SHORT:-true}"
 TEST_TIMEOUT="${TEST_TIMEOUT:-10m}"
 COVDATA_ROOT="$OUT/covdata"

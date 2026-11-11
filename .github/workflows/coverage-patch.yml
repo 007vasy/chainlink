@@ -40,9 +40,10 @@ jobs:
           go-version-file: go.mod
           go-module-file: go.sum
           build-cache-version: coverage-patch
-          # PRs restore the develop checkpoint; they do not write a new shared
-          # build cache on every push.
-          build-cache-write: default-branch-only
+          # Upsert the branch-specific build cache so later pushes on this PR
+          # reuse the coverage build outputs. The cache version is unique to
+          # this job, so concurrent PRs cannot race on one key.
+          build-cache-write: always
 
       - name: Run affected-package tests and publish patch coverage
         env:
