@@ -1,0 +1,10 @@
+{
+  "sha": "a286ce01d53be98b8101ac1b275c28a8b90ab3d3",
+  "repo": "smartcontractkit/chainlink",
+  "global_raw": 54.27,
+  "global_source_only": 60.92,
+  "patch": 43.84,
+  "report_artifact": "coverage-report-test",
+  "run_url": "https://github.com/smartcontractkit/chainlink/actions/runs/1",
+  "updated_at": "2026-11-11T06:01:41Z"
+}
